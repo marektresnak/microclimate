@@ -395,6 +395,14 @@ things that do not.
 
 ## Testing
 
+**Full case list: [`docs/test-plan.md`](docs/test-plan.md).** Written before the implementation,
+and it carries six open design questions (Q1–Q6) that must be answered before the modules they
+affect are written.
+
+The pure modules are written **test-first** — `freshness`, `precedence`, `policy`, `limiter`.
+Adapters are tested after, against fakes, because their shape is not knowable until the real
+protocol has been spoken.
+
 `node:test` + `node:assert/strict`. No framework.
 
 - **The pure core is tested directly** — `policy.ts` and `limiter.ts` take a snapshot and a
