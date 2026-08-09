@@ -57,8 +57,11 @@ npm run typecheck
 ## Scope
 
 Deliberately excluded: Docker, any UI or charting, control of the Tado heating (read-only to us),
-authentication beyond a shared token on the ingest endpoint, data retention and downsampling, and
-a time-range query endpoint. The storage schema supports the last two; they arrive when something
-needs them.
+authentication beyond a shared token on the ingest endpoint, and retention/downsampling — the
+rollup tier is designed and costed in [`CLAUDE.md`](CLAUDE.md) but not built, and until it exists
+nothing prunes.
+
+Sensor topology lives in config rather than the database, on purpose: it gives literal union
+types for room and sensor ids, and git records *why* a sensor moved in a way a table never could.
 
 Full design notes, conventions, and open questions: [`CLAUDE.md`](CLAUDE.md).

@@ -136,22 +136,52 @@ A literal union, so an invalid level cannot be constructed. Anything arriving fr
 
 ## Data model and storage
 
-One append-only table. Every reading is a fact that was true at a point in time, from a named
-instrument.
+**One table.** Every reading is a fact that was true at a point in time, from a named instrument.
 
-| Column | Why |
-|---|---|
-| `source_id` | **Which instrument**, not just which room. The bedroom will have both a Netatmo and a SEN66 reporting CO₂; control needs a precedence rule and the dashboard needs to know which line it is drawing across the changeover. |
-| `room_id` | |
-| `kind` | Stored as TEXT so a new measurement kind never needs a migration. |
-| `value` | REAL, always in the canonical unit for that kind. |
-| `measured_at` | When the **instrument** took the reading. |
-| `received_at` | When **we** learned about it. |
+```sql
+CREATE TABLE readings (
+  source_id       TEXT    NOT NULL,   -- which instrument, not which room
+  kind            TEXT    NOT NULL,   -- TEXT so a new measurement never needs a migration
+  value           REAL    NOT NULL,   -- always the canonical unit for that kind
+  measured_at     INTEGER NOT NULL,   -- epoch ms, UTC. when the instrument took it
+  received_at     INTEGER NOT NULL,   -- epoch ms, UTC. when we learned about it
+  measured_at_iso TEXT GENERATED ALWAYS AS
+    (strftime('%Y-%m-%dT%H:%M:%fZ', measured_at / 1000.0, 'unixepoch')) VIRTUAL,
+  UNIQUE (source_id, kind, measured_at)
+) STRICT;
+```
+
+**No `room_id` column.** The room is a property of the instrument, and the app knows the
+room → sources mapping from config. "Bedroom CO₂" is
+`WHERE source_id IN (...) AND kind = ? AND measured_at BETWEEN ? AND ?` — a prefix match on the
+UNIQUE constraint's implicit index. Verified:
+
+```
+SEARCH readings USING INDEX sqlite_autoindex_readings_1 (source_id=? AND kind=? AND measured_at>?)
+```
+
+So **the dedup index doubles as the query index.** No second index, no denormalised column.
+
+**`UNIQUE (source_id, kind, measured_at)` with `INSERT OR IGNORE`.** Push nodes retry, and a
+retried batch must be a no-op. Duplicates in a metrics store do not announce themselves; they
+surface months later as spikes in a graph. Note the ignore keeps the *first* `received_at`, which
+is correct — that is when the reading genuinely first arrived.
+
+**Timestamps are integer epoch milliseconds, UTC.** Not ISO text. The reason is narrow and
+decisive: `measured_at` is part of a uniqueness constraint, so it must have exactly one
+representation per instant. `2026-08-09T13:45:30+02:00` and `2026-08-09T11:45:30Z` are the same
+moment and different strings, and the constraint would not catch the duplicate. Integers have one
+representation. The `measured_at_iso` generated column costs zero storage — it is computed on
+read — and makes `SELECT *` human-readable, so nothing is given up for this.
 
 **`measured_at` and `received_at` are never conflated.** Netatmo readings arrive minutes after
 they were taken, and a push node replaying a buffered backlog can deliver hours-old readings in
 one request. Collapsing the two makes historical graphs quietly wrong and makes staleness
-detection impossible — freshness is judged on `measured_at`.
+detection impossible — **freshness is always judged on `measured_at`**.
+
+**IDs are TEXT, not integer foreign keys.** It costs roughly 20 MB across the raw table and buys
+a `SELECT *` that is readable without a join. At this scale that is the right trade, and it
+matches the project's bias toward legibility over micro-optimisation.
 
 **Canonical units, fixed:**
 
@@ -165,19 +195,61 @@ detection impossible — freshness is judged on `measured_at`.
 
 Never store a value in anything else. Conversion happens in the adapter, at the edge.
 
-**Index on `(room_id, kind, measured_at)`** — that is the dashboard's access pattern, and adding
-it later against tens of millions of rows is a bad afternoon. Expect roughly 100k rows/day once
-the SEN66 nodes are in.
-
-**`UNIQUE (source_id, kind, measured_at)`, written with `INSERT OR IGNORE`.** Push nodes retry,
-and a retried batch must be a no-op rather than a duplicate. Duplicates in a metrics store do not
-announce themselves; they surface months later as spikes in a graph.
-
 **Store everything, control on a subset.** All nine SEN66 measurements are persisted even though
 only CO₂ drives the unit. Collection is the point of the system — do not "optimise" the unused
 kinds away.
 
-Retention and downsampling are deliberately not built yet. The schema does not prevent them.
+## Topology lives in config, not the database
+
+Rooms and sensors are declared in `config.ts` as an `as const` object. There is **no `rooms` or
+`sensors` table.**
+
+Config wins because it gives literal union types for `RoomId` and `SensorId` (a typo is a compile
+error, precedence lists are exhaustively checkable), because git records *why* a sensor moved and
+a database row never could, and because a mirrored table would need a startup reconciliation step
+that can drift.
+
+Two conventions make that safe for historical data:
+
+1. **Sensors are never deleted from config.** Decommissioning sets `isActive: false`. The entry
+   stays forever so that old readings remain interpretable. Config describes the present; the
+   readings table is a record of the past, and the past needs its vocabulary kept.
+2. **Relocating a sensor means a new sensor id.** Move a SEN66 from the bedroom to the kids' room
+   and you retire `bedroom_sen66` and add `kids_sen66` — same device, two identities. Editing the
+   room of an existing id would retroactively relabel every historical reading. This is the one
+   mistake that is tempting and irreversible.
+
+The database is not self-describing on its own. That is accepted: `GET /api/sensors` serves the
+config, and the config lives in git beside the database on the same server, so any backup that
+captures one captures the other. If it ever needs to be standalone, snapshotting config into a
+`meta` table is a small job to do *then*, knowing what it is for.
+
+## Retention and rollups — designed, deliberately not built
+
+Not implemented yet. Recorded so the shape is settled when it is.
+
+Target tiers: **raw at 30 s kept for 7 days**, rolled up to **15-minute buckets** beyond that.
+
+| Tier | Rows | Size |
+|---|---|---|
+| Raw, 7 days @ 30 s | ~709k | ~61 MB, steady state — never grows |
+| Rollup, 15 min | ~1.33M/year | ~106 MB/year |
+
+Ten years lands near 1.1 GB. Without rollups the raw table grows at ~3.2 GB/year, so this is
+roughly a 30× reduction. **Revisit at around six months of runtime**, well before it matters.
+
+When it is built:
+
+- Store `count`, `avg`, `min`, `max` per bucket, not just an average. For air quality the peak is
+  the interesting number — a CO₂ spike to 1400 for ten minutes vanishes into an hourly mean, and
+  that spike is exactly what you would go looking for.
+- Roll up **closed buckets only**, and make the upsert idempotent on
+  `(source_id, kind, bucket_start)` so recomputation is harmless. Same discipline as ingest.
+- **Prune strictly after the rollup succeeds, and only what the rollup actually contains.** Derive
+  the prune from the rollup table, never from a clock. A prune that runs when the rollup failed
+  silently destroys data permanently, and there is no recovering it.
+
+Until the rollup exists, **nothing prunes**. There is no code path that deletes a reading.
 
 ## Ingest
 
@@ -190,27 +262,54 @@ timestamps intact.
 whose `measured_at` is implausibly far from now (window in config) — one misconfigured device
 otherwise poisons both the store and every freshness decision that reads from it.
 
+## The read API
+
+Two views of the same data, and one rule shared between them.
+
+| Endpoint | Shape |
+|---|---|
+| `GET /api/state` | **Room-level.** One value per `(room, kind)`, plus the current control decision and its reasoning. |
+| `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config. |
+| `GET /api/sensors` | The config topology, so a client can interpret ids without reading files. |
+| `GET /api/sensors/:id/readings` | Per-instrument detail, when you want to see the raw instrument. |
+| `GET /health` | Liveness. |
+
+**The room-level view resolves its value with the same precedence function the controller uses.**
+One implementation, two consumers. The dashboard therefore always shows what the controller is
+actually seeing, and the two disagreeing is impossible by construction rather than by discipline.
+
+Each room-level value reports **which sensor it came from and how fresh it is**. The general
+overview only needs "bedroom temperature", but the moment a number looks wrong the first question
+is which instrument said so, and the answer should already be in the response.
+
+**Never average two instruments.** Precedence is an ordered list per `(room, kind)` and the first
+fresh source wins. The kids' room has two Tado valves both reporting temperature; they read
+differently because they are next to different radiators, and a mean describes neither.
+
 ## Architecture
 
 ```
 src/
-  config.ts             all thresholds, room list, source definitions,
-                        per-(room, kind) source precedence — as const
+  config.ts             SOLE source of truth for topology: rooms, sensors
+                        (with isActive), per-(room, kind) precedence, freshness
+                        windows, thresholds — all `as const`
   domain/
-    measurement.ts      MeasurementKind, Reading, RoomId
+    measurement.ts      MeasurementKind, Reading, RoomId, SensorId
     level.ts            Level + narrowing
     signal.ts           RoomSignal — fresh | stale | missing
     decision.ts         Decision, ControlOutcome
+    precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
+                        Shared by the controller and /api/state — one rule.
   sources/
     source.ts           SensorSource interface, PollResult
     tado.ts             pull adapter
     netatmo.ts          pull adapter
   ingest/
-    http.ts             POST /api/readings — push sensors land here
+    http.ts             POST /api/readings — batched, idempotent, timestamp-validated
   store/
-    readings.ts         node:sqlite; append-only readings, latest-per-(room,kind) read
+    readings.ts         node:sqlite; append-only, no pruning path exists yet
   control/
-    freshness.ts        readings + now -> RoomSignal, per-source windows
+    freshness.ts        PURE. reading + now + per-source window -> RoomSignal
     policy.ts           PURE. snapshot -> desired Level + reasons
     limiter.ts          PURE. desired + current + last-change -> ControlOutcome
     loop.ts             orchestration: poll -> store -> decide -> actuate
@@ -219,15 +318,15 @@ src/
     modbus-tcp.ts       real implementation, FC3 + FC6
     fake.ts             test double, records calls
   http/
-    server.ts           GET /api/state, GET /health
+    server.ts           the read API
   main.ts               wiring only
 tests/
 ```
 
-**`policy.ts` and `limiter.ts` are pure and contain all the interesting reasoning.** No IO, no
-clock reads, no database. Time arrives as a parameter. This is what makes the control logic
-testable without hardware, and it is the part of the codebase a reviewer should spend their time
-in.
+**`precedence.ts`, `freshness.ts`, `policy.ts` and `limiter.ts` are pure and contain all the
+interesting reasoning.** No IO, no clock reads, no database. Time arrives as a parameter. This is
+what makes the control logic testable without hardware, and it is the part of the codebase a
+reviewer should spend their time in.
 
 `main.ts` does wiring and nothing else.
 
@@ -313,9 +412,13 @@ A reviewer should be able to read the policy tests alone and understand what the
 
 ## Configuration
 
-Everything tunable lives in `config.ts` as an `as const` object — thresholds, quiet hours, dwell,
-room list, per-source freshness windows. Secrets (Tado and Netatmo OAuth, Modbus host) come from
-environment variables and are never committed.
+`config.ts` is the sole source of truth for both **topology** (rooms; sensors with their room,
+kinds, `isActive` flag and freshness window; per-`(room, kind)` precedence order) and **tuning**
+(thresholds, quiet hours, dwell). All `as const`, so ids are literal union types and a typo is a
+compile error.
+
+Secrets — Tado and Netatmo OAuth, the Modbus host, the ingest token — come from environment
+variables and are never committed.
 
 Starting defaults, all to be tuned against reality:
 
@@ -359,7 +462,6 @@ Stated so the gaps read as decisions rather than omissions:
   backend sample.
 - **Controlling heating.** Tado keeps that. We read its sensors and nothing more.
 - **Users, auth, multi-home.** Single home, single occupant-operator, trusted LAN.
-- **Retention, downsampling, rollups.** Readings are appended and kept. At ~100k rows/day this is
-  fine for a long while; the schema does not prevent adding rollups when it stops being fine.
-- **Time-range query endpoint.** The store supports it; the endpoint arrives with the dashboard
-  that needs it. `/api/state` (current values) is enough for now.
+- **Retention, downsampling, rollups.** Designed and costed above, not built. Nothing prunes.
+- **A `rooms` / `sensors` table.** Topology is config-only, on purpose — see above.
+- **Runtime topology changes.** Adding a sensor is a config edit and a restart, not an API call.
