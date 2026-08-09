@@ -1,8 +1,14 @@
-# home — sensor collection and ventilation control
+# microclimate
 
 A service that collects readings from the sensors in my flat, stores them, exposes them over a
 small JSON API, and drives the HRV (heat-recovery ventilation) unit based on air quality —
 primarily CO₂.
+
+**It is a collection platform that currently ships one automation.** Long term this is where
+home metrics live: more automations will read from the same store, and a dashboard will be built
+on top of it. That shapes the data model — provenance, timestamps and units are designed for a
+reader that does not exist yet — but it does **not** license building a rule engine, a plugin
+system, or an automation registry. See "Growth without a framework" below.
 
 **This is also a job-application work sample.** A reviewer should be able to read it and form an
 opinion in 15–30 minutes. That sets the bar for everything below: small, obvious, well-tested,
@@ -128,11 +134,68 @@ A literal union, so an invalid level cannot be constructed. Anything arriving fr
 
 ---
 
+## Data model and storage
+
+One append-only table. Every reading is a fact that was true at a point in time, from a named
+instrument.
+
+| Column | Why |
+|---|---|
+| `source_id` | **Which instrument**, not just which room. The bedroom will have both a Netatmo and a SEN66 reporting CO₂; control needs a precedence rule and the dashboard needs to know which line it is drawing across the changeover. |
+| `room_id` | |
+| `kind` | Stored as TEXT so a new measurement kind never needs a migration. |
+| `value` | REAL, always in the canonical unit for that kind. |
+| `measured_at` | When the **instrument** took the reading. |
+| `received_at` | When **we** learned about it. |
+
+**`measured_at` and `received_at` are never conflated.** Netatmo readings arrive minutes after
+they were taken, and a push node replaying a buffered backlog can deliver hours-old readings in
+one request. Collapsing the two makes historical graphs quietly wrong and makes staleness
+detection impossible — freshness is judged on `measured_at`.
+
+**Canonical units, fixed:**
+
+| Kind | Unit |
+|---|---|
+| `temperature` | °C |
+| `humidity` | % RH |
+| `co2` | ppm |
+| `pm1`, `pm2_5`, `pm4`, `pm10` | µg/m³ |
+| `voc_index`, `nox_index` | Sensirion index, 1–500 |
+
+Never store a value in anything else. Conversion happens in the adapter, at the edge.
+
+**Index on `(room_id, kind, measured_at)`** — that is the dashboard's access pattern, and adding
+it later against tens of millions of rows is a bad afternoon. Expect roughly 100k rows/day once
+the SEN66 nodes are in.
+
+**`UNIQUE (source_id, kind, measured_at)`, written with `INSERT OR IGNORE`.** Push nodes retry,
+and a retried batch must be a no-op rather than a duplicate. Duplicates in a metrics store do not
+announce themselves; they surface months later as spikes in a graph.
+
+**Store everything, control on a subset.** All nine SEN66 measurements are persisted even though
+only CO₂ drives the unit. Collection is the point of the system — do not "optimise" the unused
+kinds away.
+
+Retention and downsampling are deliberately not built yet. The schema does not prevent them.
+
+## Ingest
+
+`POST /api/readings` accepts a **batch**: one request carrying many readings, each with its own
+`measured_at`. A SEN66 node reports nine measurements per cycle and must not make nine requests,
+and a node that buffered through a network outage replays its backlog with the original
+timestamps intact.
+
+**Validate timestamps.** A node that has not synced NTP will report 1970 or 2106. Reject readings
+whose `measured_at` is implausibly far from now (window in config) — one misconfigured device
+otherwise poisons both the store and every freshness decision that reads from it.
+
 ## Architecture
 
 ```
 src/
-  config.ts             all thresholds, room list, source definitions — as const
+  config.ts             all thresholds, room list, source definitions,
+                        per-(room, kind) source precedence — as const
   domain/
     measurement.ts      MeasurementKind, Reading, RoomId
     level.ts            Level + narrowing
@@ -177,7 +240,11 @@ Runs on a loop. Sensors are polled on their own cadences; the control decision i
 
 Pipeline, in order:
 
-1. **Snapshot.** Latest CO₂ per room, each tagged with freshness.
+1. **Snapshot.** For each room, the CO₂ reading from the **highest-precedence source that is
+   fresh**, tagged with its freshness. Precedence is config, per `(room, kind)`: once a SEN66 is
+   installed it outranks the Netatmo in that room, and the Netatmo is only consulted while the
+   SEN66 is stale or absent. Never average two instruments — they have different calibration and
+   latency, and a blended number belongs to neither.
 2. **Sleep detection.** Asleep if *any* of:
    - inside fixed quiet hours (config, default 22:00–07:00), **or**
    - bedroom CO₂ is fresh and above the sleep threshold, **or**
@@ -207,6 +274,25 @@ and those surface in `/api/state` and the logs. A decision you cannot explain af
 decision you cannot debug.
 
 ---
+
+## Growth without a framework
+
+More automations are coming, and a dashboard will be built on this. Neither justifies
+infrastructure now.
+
+The seams that make growth additive already exist:
+
+- `policy.ts` is `(snapshot, now) => decision`. A second automation is a second pure function.
+- Actuators sit behind an interface. A second device is a second adapter.
+- Readings are `(source, room, kind, value, time)`. A new sensor is config plus an adapter.
+- The store answers range queries. A dashboard is a read endpoint, not a schema change.
+
+So: **no rule engine, no plugin loader, no automation registry, no event bus.** When the second
+automation arrives, write the second function. If a third and fourth follow and a real pattern
+emerges, abstract *then*, against evidence.
+
+A reviewer has twenty minutes and wants to read one thing that works — not scaffolding for five
+things that do not.
 
 ## Testing
 
@@ -273,4 +359,7 @@ Stated so the gaps read as decisions rather than omissions:
   backend sample.
 - **Controlling heating.** Tado keeps that. We read its sensors and nothing more.
 - **Users, auth, multi-home.** Single home, single occupant-operator, trusted LAN.
-- **Historical aggregation / retention policy.** Readings are appended; pruning comes later.
+- **Retention, downsampling, rollups.** Readings are appended and kept. At ~100k rows/day this is
+  fine for a long while; the schema does not prevent adding rollups when it stops being fine.
+- **Time-range query endpoint.** The store supports it; the endpoint arrives with the dashboard
+  that needs it. `/api/state` (current values) is enough for now.
