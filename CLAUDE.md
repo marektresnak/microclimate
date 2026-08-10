@@ -132,17 +132,23 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   next cycle** — we do not yield to manual changes. A hand-set 90 or 100 is therefore pulled back
   under the ceiling, which is intended.
 
-  Decided knowingly. The cost is that a hand-set level is overwritten within 30 seconds, so the
-  panel cannot be used to quieten the unit at night. Sleep detection is quiet-hours-only, which
-  bounds the damage — during 22:00–07:00 the service will never command above `sleepMaxLevel`, so
-  the worst case is 30 being pushed back to 50 rather than to 80. **If 50 proves audible, lower
-  `sleepMaxLevel`; do not add manual-override detection without revisiting this decision
-  deliberately.**
+  Decided knowingly, and re-affirmed after two independent reviews argued against it. The cost is
+  that a hand-set level is overwritten within 30 seconds, so the panel cannot be used to quieten
+  the unit. The damage is bounded by sleep detection: whenever someone is actually asleep — by
+  quiet hours or by bedroom CO₂ — the service cannot command above `sleepMaxLevel`, so the worst
+  case is a hand-set 30 being pushed back to 50, not to 80. **If 50 proves audible, lower
+  `sleepMaxLevel`; do not add manual-override detection without revisiting this deliberately.**
+
+  Note the dependency: an earlier revision deleted CO₂ sleep inference, which removed the cap
+  outside quiet hours and quietly invalidated this reasoning — the worst case briefly became a
+  hand-set 20 pushed to 80 during an afternoon nap. Restoring CO₂ inference restored the bound.
+  **If the sleep rule is ever weakened again, this decision has to be re-examined with it.**
 - **If the service dies, the unit holds its last commanded level indefinitely.** There is no
-  watchdog and we do not set a safe level on shutdown. An unattended restart at 21:00 can leave
-  the unit at 80 all night. Accepted: the failure is rare, the alternative adds a shutdown path
-  that a hard crash or power cut would bypass anyway, and the honest fix is a device-side
-  watchdog we do not have.
+  watchdog and we do not set a safe level on shutdown. A crash at 21:30 with the unit at 80 leaves
+  it audible all night, and the next night too. Accepted, and re-affirmed after a reviewer pressed
+  the point: a shutdown handler covers only graceful exits, a hard crash or power cut bypasses it
+  entirely, and partial cover that looks like protection is worse than a known gap. The honest fix
+  is a device-side watchdog we do not have.
 
 **Known protocol details**, recovered from my earlier C# spikes in `~/RiderProjects/RecuControl`
 and `~/RiderProjects/DaphneControl` (both proven against the real unit):
@@ -422,21 +428,39 @@ Pipeline, in order:
    trust, and trust is what matters while a choice between *live* instruments exists. Once nothing
    is fresh there is no such choice, only the question of what the best remaining information is —
    and that is the newest reading, not the most trusted dead one.
-2. **Sleep detection — fixed quiet hours only** (config, default 22:00–07:00).
+2. **Sleep detection.** Asleep if *either*:
+   - inside fixed quiet hours (config, default 22:00–07:00), **or**
+   - **bedroom** CO₂ is fresh and above `SLEEP_CO2` (700 ppm).
 
-   **CO₂ is never used to infer occupancy.** An earlier revision asserted sleep when bedroom CO₂
-   exceeded 700 ppm, and that was a fatal error, not a nicety. Bedroom CO₂ is also the demand
-   signal, so *every* reading high enough to create demand (>800) had already asserted sleep
-   (>700) and capped the response at 50. Levels 60–80 were unreachable, and the state
-   self-sustained: capped airflow clears CO₂ slowly, so the false "asleep" persisted for hours.
-   Saturday afternoon, kids in the bedroom with the door shut at 1100 ppm, and the system
-   throttles *down*.
+   Sleep **de-asserts only after bedroom CO₂ has been below 700 for 10 continuous minutes**
+   (`SLEEP_RELEASE_MINUTES`). Without that hold it chatters as the room clears in the morning,
+   which is exactly when CO₂ crosses the threshold slowly, and a door opened for a minute would
+   drop the cap.
 
-   The root fault was structural, not a bad threshold. No arrangement of numbers fixes a signal
-   used simultaneously to raise demand and to clamp the response. Quiet hours depends on no
-   sensor and cannot contradict anything.
+   **Why CO₂ is a valid occupancy signal here, when in general it is not.** This bedroom is never
+   *merely* occupied — nobody sits in it. CO₂ above 700 ppm in that room means someone is
+   sleeping. That is a fact about this flat, not a general principle, and it is the entire
+   justification for the rule. If the room's use ever changes, delete this clause.
 
-   Accepted cost: a nap or an early night before 22:00 gets no cap.
+   The open window case is not covered — someone asleep with the window open may exceed 700
+   without a cap applying, or clear below it while still asleep. Accepted: an open window already
+   admits more noise than the unit makes.
+
+   Quiet hours remains as the second, sensor-independent guarantee, so a dead Netatmo can never
+   let the unit run loud at 3am.
+
+   **A previous revision deleted this clause**, on the grounds that bedroom CO₂ was simultaneously
+   the demand signal and the occupancy signal, so anything creating demand also asserted sleep.
+   That is true, and it is *intended*: when someone is asleep in the bedroom, the response should
+   be capped, and levels above 50 being unreachable is the requirement rather than a defect. The
+   scenario used to condemn it — kids playing in the bedroom at 1100 ppm on a Saturday afternoon —
+   does not occur in this flat.
+
+   Deleting it also caused a regression: with the cap keyed to the clock alone, the loop's
+   internal level tracked to 70–80 overnight and released in one move at 07:00, into a bedroom
+   where people were still asleep. It fired *only* when the requirement was active — had they
+   woken and opened the door, CO₂ would have collapsed and the level walked down first. Keying the
+   cap to CO₂ instead of a clock means it lifts when the room actually clears.
 3. **Demand — a proportional band.** Highest fresh CO₂ across all rooms drives the target; worst
    room wins. Stale and missing readings are excluded entirely, **in both directions**: a stale low
    reading is never treated as good air, and a stale high one never pins the unit at the ceiling.
@@ -474,13 +498,25 @@ Pipeline, in order:
      50 immediately, in one move. Evening cooking leaving it at 70 must not run all night because
      demand sat mid-range and produced no new target. A hard requirement does not wait on a rate
      limiter.
-7. **Rate limit — asymmetric.**
-   - **Increases apply immediately and may move any distance.** A cooking or party spike gets full
-     airflow at once. Under-ventilating is the failure that matters; over-ventilating only costs
-     noise and heat.
-   - **Decreases move at most one step, and are subject to dwell.** The gradual retreat is what
-     stops CO₂ crashing and rebounding into the next boost.
+7. **Rate limit — asymmetric, but bounded in both directions.**
+   - **Increases move one step per `UP_STEP_SECONDS` (90 s).** A 20 → 80 climb ramps over about
+     four and a half minutes.
+   - **Decreases move one step per `minDwellMinutes` (10 min).** The slow retreat is what stops
+     CO₂ crashing and rebounding into the next boost.
    - The sleep cap in step 6 is **not** a decrease for this purpose. It is immediate and unlimited.
+
+   **Increases were previously unbounded**, and that was wrong on the requirement's own terms. The
+   hard requirement is *not audible*, which makes **up** the dangerous direction and **down** the
+   safe one — the design bounded the safe one and left the dangerous one free. Concretely, an
+   empty flat at level 20 with two people arriving at 23:00 would jump **20 → 50 in a single
+   cycle** as they fell asleep, and a step change in fan noise is far more noticeable than a ramp
+   to the same level.
+
+   Ramping costs nothing in control terms: the CO₂ signal already lags 7–8 minutes, so a
+   four-minute climb is invisible against it. It also fixes an authority blowout waiting at the
+   SEN66 transition — Netatmo offers ~8 upward opportunities an hour, three SEN66 nodes behind a
+   max offer ~120, while release stays at one step per 10 minutes. Unbounded increases against a
+   fast signal would leave the unit living at its ceiling.
 
    This replaces an earlier revision that had no rate limit at all. With only an input deadband,
    demand crossing 800 slammed 20 → 80, the unit pulled CO₂ under 650 inside one dwell, and it
@@ -499,11 +535,30 @@ Pipeline, in order:
    first run acts immediately; a restart two minutes after a change waits out the remaining eight.
    Without persistence a crash loop becomes one change per restart rather than one per ten minutes.
 
+   **Clamp the persisted value on read.** If `last_change_at` is in the future, or more than 24
+   hours old, treat the dwell as expired. A machine whose clock has not yet synced makes
+   `now − last_change_at` negative, and an unclamped dwell then *never* expires — the level can
+   only ever go up, permanently, and surviving a reboot. That is a strictly worse failure than the
+   one persistence was added to fix, which at least self-healed.
+
+   **A state row that cannot be read is an error, not a first run.** A missing volume mount or a
+   read-only filesystem would otherwise look like a genuine first start on every restart, silently
+   restoring the crash-loop bug with the fix nominally in place and nobody looking for it.
+
    **Dwell must be at least as long as the slowest CO₂ source's refresh interval.** Netatmo
    updates every 7–8 minutes, so a shorter dwell would act again before the effect of the last
    change could possibly be observed. Ten minutes satisfies this; it is a constraint, not a
    coincidence, and it moves if the sensor fleet does.
 9. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80).
+10. **Read the unit's actual level back every tick** (FC3, already verified) and compare it to
+    `last_commanded`. A mismatch means a human used the wall panel.
+    - If the actual level **breaches the sleep cap**, correct it immediately, in one move, through
+      the cap path — not rate-limited.
+    - Otherwise the normal rules apply on the next decision.
+
+    Without this the loop compares its computed target to `last_commanded`, finds them equal,
+    writes nothing — and a hand-set 80 runs all night while the log reports *"level 40, no change
+    needed"*. The violation would be invisible in exactly the case that matters.
 
 **On steps 3, 5, 7 and 8 together:** settling needs all four. The band's *width* sets the loop
 gain and is what makes convergence provable; hysteresis stops boundary chatter; the asymmetric
@@ -692,10 +747,13 @@ Starting defaults, all to be tuned against reality:
 | `C_LO` — band bottom, level 20 | 550 ppm | **derived** |
 | `C_HI` — band top, level 80 | 1250 ppm | **derived** |
 | `CO2_HYSTERESIS` | 60 ppm | derived (≈ ½ step) |
+| `SLEEP_CO2` — bedroom, asserts sleep | 700 ppm | tune |
+| `SLEEP_RELEASE_MINUTES` — hold below before de-assert | 10 min | tune |
 | Quiet hours | 22:00–07:00 | tune |
 | Sleep max level | 50 | tune |
 | Safe default level (no data) | 40 | tune |
-| Minimum dwell | 10 minutes | tune, floor ≥ 8 min |
+| `minDwellMinutes` — one step down | 10 minutes | tune, floor ≥ 8 min |
+| `UP_STEP_SECONDS` — one step up | 90 s | tune |
 | Control evaluation interval | 30 s | tune |
 | `MIN_LEVEL` | 20 | **physical** |
 | `MAX_COMMANDED_LEVEL` | 80 | **physical** |
@@ -727,8 +785,9 @@ observe the last change.
   by assuming they periodically see outdoor air; a flat that never gets down to outdoor CO₂ will
   drift, and a drifted zero silently shifts the whole band.
 
-There is **no bedroom sleep CO₂ threshold** any more. If 50 turns out to be audible in practice,
-lower `sleepMaxLevel` — do not reintroduce CO₂-based occupancy inference.
+`SLEEP_CO2` at 700 ppm rests on a fact about this flat — the bedroom is never merely occupied, so
+CO₂ above 700 there means someone is asleep. It is not a general principle and does not transfer
+to a room people sit in.
 
 ---
 

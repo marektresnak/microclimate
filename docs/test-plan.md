@@ -94,6 +94,54 @@ commercial 200 ppm figure would have given loop gain 2.5–19 and an hour-period
 within 30 seconds, and recommended honouring manual changes. Rejected knowingly — see the actuator
 section for the reasoning and the residual risk.
 
+### Second review round, R1–R8
+
+The design was reviewed again after F1–F8, by a fresh adversarial pass and a pass asked
+specifically to find regressions the fixes had introduced. Both independently found the same one.
+
+**R1 — CO₂ sleep inference is RESTORED**, with a 10-minute hold below 700 before it de-asserts.
+F1 deleted it on the grounds that bedroom CO₂ both created demand and capped the response. That
+overlap is real and it is *intended*: this bedroom is never merely occupied, so CO₂ above 700
+there means someone is asleep, and levels above 50 being unreachable then is the requirement, not
+a defect. The scenario used to condemn the rule — children playing in the bedroom on a Saturday
+afternoon — does not occur in this flat.
+
+Deleting it also caused the regression both reviewers found: with the cap keyed to the clock, the
+loop's internal level tracked to 70–80 overnight and released **50 → 80 in one cycle at 07:00**,
+into a bedroom where people were still asleep. It fired only when the requirement was active — had
+they woken and opened the door, CO₂ would have collapsed and the level walked down first. Keying
+the cap to CO₂ means it lifts when the room clears, not when the clock strikes.
+
+**R2 — increases are now rate-limited**, one step per 90 s. Unbounded increases were wrong on the
+requirement's own terms: *not audible* makes up the dangerous direction, and the design bounded
+the safe one. The CO₂ signal already lags 7–8 minutes, so a four-minute ramp is invisible in
+control terms and removes every audible step change.
+
+**R3 — the band is unchanged.** A reviewer argued the 1/Q² plant makes one step move CO₂ further
+than the band's step width at low levels, so the loop hunts below level 50. Not acted on: the
+high-gain zone is the bedroom behind a closed door, and the bedroom only dominates demand when
+someone is asleep in it — at which point the output is capped and the loop is saturated, so it
+cannot hunt. Daytime demand comes from the living room, which has a larger flow share and gentler
+gain. Recompute from measured data in week one rather than tuning against a model.
+
+**R4 — the loop reads the actual level back every tick.** Nothing previously said it did, so a
+hand-set 80 could run all night while the log reported "level 40, no change needed".
+
+**R5 — the simulator models rooms separately.** With one well-mixed volume the sleep logic is
+untestable, because bedroom CO₂ and demand CO₂ are the same number.
+
+**R6 — the persisted last-change timestamp is clamped on read**, and an unreadable state row is an
+error rather than a first run.
+
+**R7 — deferred, noted.** A push node with a stuck clock stamps every reading identically and
+`INSERT OR IGNORE` silently swallows all but the first, so the node looks online and stores
+nothing. The fix is an alarm on duplicate-ignore rate per source. Ingest is tier 2 and the nodes
+do not exist yet; **build this with the ingest endpoint, not after it.**
+
+**R8 — no safe level on shutdown, re-affirmed.** A handler covers only graceful exits; a hard
+crash or power cut bypasses it, and partial cover that reads as protection is worse than a known
+gap.
+
 ---
 
 ## Strategy
@@ -136,9 +184,28 @@ while running high stays high; at 700 while running low stays low. Same number, 
 
 ## The closed-loop settle test
 
-The one test with time in it. `sim/room.ts` is a crude model — occupancy adds a fixed ppm per
-minute, ventilation removes CO₂ in proportion to the level — and the clock is a counter rather
-than a wall, so twenty-four simulated hours run in milliseconds.
+The one test with time in it. `sim/room.ts` models **each room separately** — its own occupancy
+and its own share of the unit's airflow — and the controller takes the max across them exactly as
+it does in reality. The clock is a counter rather than a wall, so twenty-four simulated hours run
+in milliseconds.
+
+**Per-room is not optional.** With a single well-mixed volume there is only one CO₂ number, so
+bedroom CO₂ and demand CO₂ are necessarily identical — and the sim can then never produce the two
+situations that matter most: *bedroom clear, living room stuffy* (the ordinary daytime case, where
+the output must be free to reach 80), and *people asleep in a stuffy bedroom while the rest of the
+flat is fine* (the case the sleep cap exists for). The sleep logic would ship with no test able to
+tell it working from broken.
+
+**Assert the requirements, not "it settled".** A proportional loop with a decrease limit on a
+first-order plant almost always settles, so that assertion is close to unfalsifiable. Assert
+instead: the output never exceeded `sleepMaxLevel` while sleep was asserted, no adjacent pair of
+commanded levels differs by more than one step, peak CO₂ stayed under a stated ceiling, and the
+change count over 24 hours stayed under a stated bound.
+
+**A run that saturates at the ceiling fails, it does not pass.** In the restricted-airflow and
+high-occupancy corners the loop pins at 80 and CO₂ parks around 1800–2000. "It settled" is
+vacuously true there, so the test would report success on precisely the flats it was added to
+check.
 
 - **Base case.** Two people in the bedroom 23:00–07:00, doors closed. Assert the level changes
   fewer than N times overnight, never exceeds `sleepMaxLevel`, and CO₂ stays below a stated
@@ -162,7 +229,8 @@ settle test runs the **base case across every plausible flat**, not just one:
 | Axis | Range swept |
 |---|---|
 | Airflow at level 20 → 80 | 45 → 140 (restricted install) through 70 → 220 m³/h (optimistic) |
-| Occupants | 2 to 5 |
+| Occupants, and which room they are in | 2 to 5, distributed |
+| Bedroom's share of total flow | 20–50% |
 | Outdoor CO₂ | 400–450 ppm |
 
 Roughly a dozen combinations. **Assert it settles in all of them** — change count stays bounded
@@ -242,18 +310,24 @@ passing is not reassuring.
 
 ### Sleep
 
-Quiet hours only. **CO₂ never asserts sleep** — see F1.
+Two independent assertions: quiet hours, or fresh bedroom CO₂ above 700.
 
 - inside quiet hours → sleeping, whatever CO₂ says
-- outside quiet hours → not sleeping, whatever CO₂ says
+- **bedroom CO₂ fresh and above 700, outside quiet hours → sleeping.** The afternoon-nap case.
+- **de-assert requires 10 continuous minutes below 700** — CO₂ dipping below 700 for two minutes
+  (a door opened) must not drop the cap
+- the 10-minute hold restarts if CO₂ goes back above 700 within it
+- **bedroom CO₂ stale or missing, outside quiet hours → not sleeping.** Only a fresh reading can
+  assert it; a dead Netatmo must not cap ventilation all day.
+- **living-room CO₂ at 1400 while bedroom sits at 500 → not sleeping**, and the level is free to
+  reach 80. Only the *bedroom* sensor asserts sleep; demand comes from all rooms.
+- **the 07:00 regression guard**: capped at 50 overnight with bedroom CO₂ at 1300, clock passes
+  07:00 → still sleeping, still capped, because the room has not cleared. The cap must lift when
+  CO₂ falls, not when the clock strikes.
 - **quiet hours wrap midnight** — 23:30 sleeping, 02:00 sleeping, 12:00 not. 22:00–07:00 is
   `hour >= 22 || hour < 7`; written with `&&` it is *always false* and the night cap silently
   never fires. Most likely bug in the project.
 - quiet-hours boundaries exactly at 22:00 and 07:00 → pinned
-- **F1 regression guard: bedroom CO₂ at 1100 ppm outside quiet hours → NOT sleeping, and the
-  level is free to exceed 50.** This is the case that was structurally impossible before — high
-  CO₂ asserted sleep, which capped the response to the CO₂. Levels 60–80 must be reachable on
-  demand alone.
 - **every sensor dead, inside quiet hours → still sleeping.** Quiet hours depends on no sensor,
   and is now the only thing between a dead Netatmo and a loud unit at 3am.
 - sleeping caps the level to `sleepMaxLevel`
@@ -264,16 +338,21 @@ Quiet hours only. **CO₂ never asserts sleep** — see F1.
 
 `(desired, current, sleeping, lastChangeAt, now) -> ControlOutcome`
 
-**Rate limiting — asymmetric (F3)**
+**Rate limiting — asymmetric, bounded both ways**
 
-- **an increase applies immediately and at full distance** — 20 → 80 in one move, no dwell wait
-- **a decrease moves one step only** — desired 20 from current 80 yields 70, not 20
-- a decrease is subject to dwell; the next step waits `minDwellMinutes`
-- **descending 80 → 20 takes six changes and sixty minutes**, one step each
-- an increase *during* a descent applies at once and is not held by the descent's dwell
-- **F3 regression guard: demand crossing 800 must not produce 20 → 80 → 20.** Given a CO₂ series
-  that rises past 800 and falls below 650 within one dwell, the level must not return to 20 in a
-  single move.
+- **an increase moves one step per `UP_STEP_SECONDS` (90 s)** — desired 80 from current 20 yields
+  30, not 80
+- **a decrease moves one step per `minDwellMinutes` (10 min)** — desired 20 from current 80 yields
+  70, not 20
+- climbing 20 → 80 takes six steps and about four and a half minutes
+- descending 80 → 20 takes six steps and sixty minutes
+- a reversal mid-ramp is honoured on the next permitted step, in the new direction
+- **no audible step change**: no single transition may exceed one level step. Given any CO₂ series
+  at all, assert every adjacent pair of commanded levels differs by at most 10.
+- **the bedtime regression guard**: empty flat at 20, two people arrive at 23:00, CO₂ climbs past
+  a boundary → the level must ramp, never jump 20 → 50 in one cycle
+- **the square-wave regression guard**: a CO₂ series that rises past the band and falls back
+  within one dwell must produce no single-move return to the floor and no 20 → 80 → 20 sequence
 
 **Dwell**
 
@@ -300,6 +379,25 @@ Quiet hours only. **CO₂ never asserts sleep** — see F1.
   permanently resets the dwell timer
 - **the cap clamps the output, not the loop's internal level** — after eight capped hours, leaving
   quiet hours returns the unit to whatever demand actually is, with no jump and no catch-up
+
+**Read-back and the wall panel**
+
+- actual level equals `last_commanded` → nothing written
+- **actual level differs and breaches the sleep cap → corrected immediately, in one move.** Unit
+  hand-set to 80 at 23:30, sleep asserted: the next tick must command 50, not walk down over 40
+  minutes and not report "no change needed".
+- actual level differs without breaching the cap → normal rules apply on the next decision
+- **the silent-violation guard**: with the target equal to `last_commanded`, a hand-set level
+  above the cap must still be detected. Asserting on the log line alone would pass this while the
+  unit ran loud all night.
+
+**Persisted state**
+
+- `last_change_at` in the future → dwell treated as expired, not blocked. Guards the unsynced-clock
+  case where an unclamped dwell never expires and the level can only ever rise.
+- `last_change_at` more than 24 hours old → dwell treated as expired
+- **no row → first run, acts immediately; unreadable state → error, not first run.** A missing
+  mount must not look like a fresh start on every restart.
 
 **Levels**
 
