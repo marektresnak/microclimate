@@ -366,7 +366,10 @@ CO₂ authority (~1070 ppm) exceeds the 700 ppm band. If it does fail, widen the
 - no fresh CO₂ anywhere → `safeDefaultLevel`, and a reason saying the system is blind
 - every room below the release threshold → minimum (20)
 - one room above the boost threshold → raised
-- two rooms with fresh CO₂ → **the worse one drives**
+- two rooms with fresh CO₂ → **the worse one drives**, and assert it with the worse room *last* in
+  the config order as well as first. With only the first-is-worst case, "worst room wins" and
+  "first fresh room wins" give the same answer, and the difference is a fan idling at the floor
+  while a room sits at 1300 ppm.
 - **a stale LOW reading is excluded** — bedroom stale at 400, kids fresh at 1100 → boost. The
   stale value must not average the demand down.
 - **a stale HIGH reading is also excluded** — a dead sensor last seen at 1400 must not pin the
@@ -550,6 +553,13 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - **the margin is pinned, not merely present.** The "merely bad air" case has to run against a
   source that keeps reporting, or the reading goes stale, the alarm is disarmed by staleness rather
   than by the threshold, and the assertion holds however wrong the threshold is.
+- **the ceiling half of the condition is pinned too** — 1400 ppm at night with the sleep cap
+  holding the fan at 50 must produce no alarm. The fan is under orders, not out of air.
+- **a failed write does not freeze the clock.** The diagnostic runs on every tick, including one
+  whose write failed, and judges on where the unit actually is. Skipping it there lets a spell of
+  failing writes hide a clearing, after which the alarm dates itself from before it.
+- **the below-300-ppm calibration check is deferred with the ingest endpoint**, where readings
+  arrive. Recorded here so its absence reads as a decision.
 
 ## `http/server.ts`
 

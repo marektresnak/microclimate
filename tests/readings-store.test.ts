@@ -97,6 +97,25 @@ describe('the readings store', () => {
     store.close();
   });
 
+  it('returns a replayed backlog in the order it was measured', () => {
+    // Same rule as the latest-reading query, and it matters more here: a history
+    // series ordered by arrival puts a replayed backlog after the readings that
+    // overtook it, and a graph drawn from that is quietly wrong.
+    const store = openReadingStore(':memory:');
+    store.insert([
+      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE, NOW - MINUTE),
+      reading('bedroom_netatmo', 'co2', 400, NOW - 60 * MINUTE, NOW),
+    ]);
+
+    const history = store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW);
+
+    assert.deepEqual(
+      history.map((stored) => stored.value),
+      [400, 845],
+    );
+    store.close();
+  });
+
   it('keeps kinds and sources apart', () => {
     const store = openReadingStore(':memory:');
 

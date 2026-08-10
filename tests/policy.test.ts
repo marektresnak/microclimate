@@ -112,6 +112,20 @@ describe('demand', () => {
     assert.equal(decide(snapshot, WINTER_MIDDAY).desiredLevel, 60);
   });
 
+  it('lets the worse room drive even when it comes last in the config order', () => {
+    // The mirror of the case above, and it is not redundant: there the worse room
+    // is also the first one iterated, so "worst" and "whichever we saw first" are
+    // the same answer. Only this direction can tell them apart, and getting it
+    // wrong idles the fan at the floor while a room sits at 1300 ppm.
+    const snapshot = snapshotOf({
+      livingRoom: fresh('living_room_tado', 600),
+      bedroom: fresh('bedroom_netatmo', 1300),
+      currentLevel: 20,
+    });
+
+    assert.equal(decide(snapshot, WINTER_MIDDAY).desiredLevel, 80);
+  });
+
   it('excludes a stale LOW reading rather than averaging the demand down', () => {
     // A dead sensor sitting at 400 ppm must never read as good air.
     const snapshot = snapshotOf({

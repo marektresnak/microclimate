@@ -121,6 +121,10 @@ Interfaces and fakes stand in for all of these; none of them changes the control
 - **Modbus TCP.** `VentilationUnit` is the seam; `actuator/fake.ts` stands in. The protocol details
   are recovered and recorded in `CLAUDE.md` — register 21001, percent × 10, FC3 and FC6.
 - **`POST /api/readings`** and the JSON read API.
+- **The below-300-ppm calibration check.** A reading under 300 ppm means an NDIR sensor's
+  self-calibration has drifted, which silently shifts the whole band. It is a check on readings as
+  they arrive, so it belongs with the ingest endpoint rather than in the control loop. The other
+  diagnostic — pinned at the ceiling — is built, because that one is about the decision.
 
 ## Deliberately out of scope
 

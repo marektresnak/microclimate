@@ -396,6 +396,35 @@ describe('the control loop', () => {
     store.close();
   });
 
+  it('does not let a failed write freeze the capacity clock', async () => {
+    // The air clears while the unit cannot be written to. If that tick skips the
+    // diagnostic, the clearing is never seen, and when the air goes bad again the
+    // alarm dates itself from before it — firing early and claiming ten minutes
+    // of a condition that lasted two.
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 1400);
+    const unit = createFakeUnit(80);
+    const log = recorder();
+    const loop = createControlLoop({ sources: [live.source], store, unit, log: log.log });
+
+    await loop.tick(MIDDAY);
+
+    live.ppm = 500;
+    unit.failWrites = true;
+    await loop.tick(MIDDAY + MINUTE);
+
+    live.ppm = 1400;
+    unit.failWrites = false;
+    for (let minute = 2; minute <= 10; minute += 1) {
+      await loop.tick(MIDDAY + minute * MINUTE);
+    }
+
+    // The condition re-asserted at minute two, so the earliest honest alarm is
+    // minute twelve.
+    assert.equal(capacityReports(log), 0);
+    store.close();
+  });
+
   it('carries the sleep state from one tick to the next', async () => {
     // The R1 regression, at the level the loop is responsible for: the extender
     // only works if the loop remembers what the last cycle decided. Keyed to the

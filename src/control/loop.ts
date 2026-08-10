@@ -107,22 +107,35 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
     const outcome = limit(decision, currentLevel, lastChangeAt, now);
     wasSleeping = decision.sleeping;
 
-    if (outcome.write) {
-      try {
-        await dependencies.unit.set(outcome.level);
-      } catch (error) {
-        // The state is left alone deliberately, so the next tick tries again.
-        dependencies.log(`could not command ${outcome.level}%: ${messageOf(error)}`);
-        return;
-      }
+    const landed = outcome.write ? await command(outcome.level) : true;
+
+    if (landed) {
+      // Left alone on a failed write, deliberately, so the next tick tries again.
+      currentLevel = outcome.level;
+      lastChangeAt = outcome.lastChangeAt;
     }
 
-    currentLevel = outcome.level;
-    lastChangeAt = outcome.lastChangeAt;
+    // On every tick, including one whose write failed. An earlier version
+    // returned early there, so a spell of failing writes left the diagnostic
+    // blind: the air could clear and go bad again unseen, and the alarm would
+    // then date itself from before a clearing it never saw.
+    //
+    // Judged on where the unit actually is rather than on what we wanted, for
+    // the same reason — after a failed write those are different levels.
+    reportCapacity(snapshot, currentLevel, now);
 
-    reportCapacity(snapshot, outcome.level, now);
-    const action = outcome.write ? 'set' : 'held';
-    dependencies.log(`${outcome.level}% ${action} — ${outcome.reasons.join('; ')}`);
+    const action = outcome.write && landed ? 'set' : 'held';
+    dependencies.log(`${currentLevel}% ${action} — ${outcome.reasons.join('; ')}`);
+  }
+
+  async function command(level: CommandedLevel): Promise<boolean> {
+    try {
+      await dependencies.unit.set(level);
+      return true;
+    } catch (error) {
+      dependencies.log(`could not command ${level}%: ${messageOf(error)}`);
+      return false;
+    }
   }
 
   async function readActualLevel(): Promise<Level | undefined> {
