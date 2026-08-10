@@ -40,6 +40,30 @@ clever, generic, or written for a requirement we do not have fails review even i
 - **Comments explain *why*, never *what*.** A comment restating the code is noise. A comment
   recording a decision, a constraint, or a failure we are defending against is the point.
 
+### Readable over compact
+
+Write idiomatic TypeScript and stop there. Respect the language's conventions; do not show them
+off. The test for any line is whether it can be **narrated out loud** — if explaining it takes a
+paragraph, it is wrong however elegant it looks.
+
+- **Name the intermediate steps.** A chain that has to be read right-to-left or inside-out gets
+  broken into named `const`s. Three short named steps beat one dense expression, always.
+- **No nested ternaries.** One level is fine for a genuine either/or. Two is a rewrite.
+- **Early returns over nested `if`.** The happy path should be the least-indented code in the
+  function.
+- **A `for...of` loop is not a failure.** Reach for `reduce` when the operation genuinely is a
+  fold, not to avoid writing a loop.
+- **Do not split functions to hit a line count.** One coherent 40-line function beats four
+  10-line ones with invented names and a call graph to trace.
+- **`?.` and `??` are good; a five-link optional chain is not** — it hides whether the thing was
+  ever supposed to exist. If absence is meaningful, handle it explicitly.
+- **No abbreviated identifiers.** `bedroomSignal`, not `bdSig`.
+- **Keep destructuring simple.** Renames, defaults and nesting stacked into one pattern is a
+  puzzle, not a convenience.
+
+Not idiomatic *here*, however common elsewhere: classes with inheritance, decorators, getters
+that do work, point-free style, currying, and heavy functional composition.
+
 **Working style:** build one module at a time, with its tests, and stop. Do not scaffold five
 files ahead. I review each before the next starts.
 
