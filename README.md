@@ -34,6 +34,14 @@ staleness window can say so. A pure function turns the current snapshot into a d
 level with its reasoning attached; a second pure function applies a deadband, a night-time cap
 and a dwell timer before anything reaches the hardware over Modbus TCP.
 
+The control law is ASHRAE Guideline 36's proportional-only demand-controlled-ventilation
+sequence: CO₂ maps to fan level along a straight line, with hysteresis at each step boundary and
+asymmetric timing — fast to respond, slow to retreat. The one parameter that decides whether it
+settles or oscillates is the width of that line, and it has to be at least as wide as the CO₂
+swing the fan can itself produce. Nobody has measured that for this flat yet, so the width is an
+estimate validated by sweeping the simulator across every plausible version of the flat, and it
+will be recomputed from logged data once there is some.
+
 The interesting properties are the safety ones: a sensor that goes silent must never read as
 "air is fine", and a dead sensor at 3am must never let the unit run loud.
 

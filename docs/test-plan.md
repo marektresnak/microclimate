@@ -154,6 +154,28 @@ than a wall, so twenty-four simulated hours run in milliseconds.
 - **Sensor dies at 02:00.** Readings stop. Assert the level falls back to the safe default, stays
   capped, and does not drift.
 
+### The sensitivity sweep
+
+Nobody has measured this flat's response, and the band was sized against an estimate. So the
+settle test runs the **base case across every plausible flat**, not just one:
+
+| Axis | Range swept |
+|---|---|
+| Airflow at level 20 → 80 | 45 → 140 (restricted install) through 70 → 220 m³/h (optimistic) |
+| Occupants | 2 to 5 |
+| Outdoor CO₂ | 400–450 ppm |
+
+Roughly a dozen combinations. **Assert it settles in all of them** — change count stays bounded
+and there is no repeated full-range swing.
+
+This is the point of the exercise: the controller does not need to know which flat it is in, it
+needs to work in any of them. A failing corner is a result, not a bug — it says the band is too
+narrow or the down-dwell too short for that case, and it says so before installation rather than
+after a bad night.
+
+The corner most likely to fail is restricted install with four or five occupants, where the fan's
+CO₂ authority (~1070 ppm) exceeds the 700 ppm band. If it does fail, widen the band first.
+
 This is where the requirements are actually tested. If one of these fails, the per-function tests
 passing is not reassuring.
 
@@ -213,9 +235,10 @@ passing is not reassuring.
 - **monotonic**: higher CO₂ never produces a lower level (property-style, table-driven)
 - **hysteresis at a step boundary**: sitting exactly on a boundary and wobbling ±20 ppm produces
   no change; crossing it by more than 60 ppm does
-- **the loop-gain guard**: with the configured band, a level change must not produce a CO₂ swing
-  larger than the band. Assert `C_HI - C_LO >= fanAuthority` at config load so a future narrowing
-  fails loudly rather than oscillating in the flat.
+- **the loop-gain guard**: assert at config load that `C_HI - C_LO` is at least the estimated fan
+  authority, so a future narrowing of the band fails loudly rather than quietly oscillating in the
+  flat. The authority figure is an estimate until there is logged data — the guard checks the
+  band against whatever is currently believed, and the belief is expected to change.
 
 ### Sleep
 

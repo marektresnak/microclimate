@@ -518,8 +518,25 @@ Written out because it has to be explained aloud, and the vocabulary is worse th
 in between. The 700 ppm span is the "band". A wider band means a gentler reaction to the same
 change in CO₂.
 
-**Why the width decides whether it settles.** The fan changes CO₂, the new CO₂ changes the fan,
-round and round. Starting deliberately wrong at level 70, with four people in the flat:
+**The failure it prevents, without the maths.** It is a shower with a long pipe. The water is
+cold, so you turn the tap up hard. Nothing happens — the pipe is long — so you turn it further.
+Then scalding water arrives and you crank it back. Freezing again. You weave between extremes, and
+the harder you react the worse it gets.
+
+Two fixes, and they are the two things in this controller: **smaller adjustments per unit of
+wrongness** (that is the band width) and **wait before adjusting again** (that is dwell).
+
+In one sentence: **if the fan reacts more strongly than its own action changes things, it chases
+its own tail.**
+
+**How wide is wide enough.** The fan can only hold CO₂ somewhere between a floor (at level 80) and
+a ceiling (at level 20). That span is its *authority*. A band narrower than the authority means
+driving the fan end to end moves CO₂ further than the band covers, so it slams between extremes.
+
+> **The band must be at least as wide as the CO₂ swing the fan can actually produce.**
+
+Worked illustration, using *assumed* airflow of 80 m³/h at level 20 and 260 at level 80, four
+occupants. Start deliberately wrong at level 70:
 
 | Fan at | CO₂ settles at | Line says |
 |---|---|---|
@@ -533,20 +550,57 @@ round and round. Starting deliberately wrong at level 70, with four people in th
 | | | ≈ **48**, settled |
 
 Each swing is smaller than the last. That ratio — fan movement against CO₂ movement — is the
-**loop gain**, and ours is **0.72**. Below 1 converges; above 1 grows into oscillation.
+**loop gain**; here it is 0.72. Below 1 converges, above 1 grows into oscillation.
 
-**How wide is wide enough.** At four occupants this unit can only hold CO₂ somewhere between
-~708 ppm (level 80) and ~1358 ppm (level 20). That 650 ppm span is its entire *authority*. A band
-narrower than the authority means driving the fan end to end moves CO₂ further than the band
-covers — so the fan slams between extremes. Hence the sizing rule:
+**Read that table as an illustration of the mechanism, not as a measurement of this flat.** See
+the next section for what is actually known.
 
-> **The band must be at least as wide as the CO₂ swing the fan can actually produce.**
-> The controller has to react less strongly than it acts.
+This is also why the commercial 200 ppm band does not transfer. An office VAV damper has enormous
+airflow authority relative to its zone, so one step barely moves CO₂. A restricted HRV in a small
+flat moves it a lot, and at 200 ppm the loop gain here would be several times 1 — a guaranteed
+limit cycle with roughly an hour period.
 
-This is why the commercial 200 ppm convention does not transfer. An office VAV damper has huge
-airflow authority relative to its zone, so each step barely moves CO₂. A restricted HRV in a
-200 m³ flat moves it a lot: at 200 ppm the loop gain here would be 2.5–19 and it would limit-cycle
-with roughly an hour period.
+## What is actually known about this flat, and what is not
+
+**Flat volume does not affect the band.** Steady-state CO₂ is `outdoor + generation ÷ airflow`;
+volume does not appear. 58 m² × 2.55 m ≈ **148 m³** sets how *fast* the room responds — a time
+constant of roughly 35 minutes to 3 hours depending on level — not where it settles. An earlier
+revision cited a 200 m³ figure as though it mattered to the band. It never did.
+
+**What does matter is the airflow range and the occupancy**, and occupancy dominates. The unit is
+a **2VV Daphne HRDA2-030**, nominally around 300 m³/h — but that is a test-rig figure at zero
+external pressure. Real ducting plus the restricted intake grille could plausibly halve it, and
+nobody has measured it.
+
+Authority across the plausible corners:
+
+| | 2 people | 4 people |
+|---|---|---|
+| Optimistic install (70 → 220 m³/h) | ~350 ppm | ~690 ppm |
+| Restricted install (45 → 140 m³/h) | ~540 ppm | ~1070 ppm |
+
+**So authority is somewhere between roughly 350 and 1100 ppm, and the 700 ppm band sits in the
+middle of that range.** At the restricted-install, four-occupant corner the pure loop gain would
+be about 1.5 — the hunting condition.
+
+**Why that is tolerable rather than alarming.** The loop-gain argument assumes the controller
+jumps straight to its computed target each round. This one cannot: decreases move one step per
+dwell. That rate limit is a damper the gain analysis does not model, so where the band turns out
+too narrow the failure degrades into slow drift with mild overshoot rather than a square wave.
+The band handles stability when it is sized right; the rate limiter is the backstop when it is not.
+
+**How this gets resolved properly.** Two steps, in order:
+
+1. **Sweep the corners in the settle test** — four to six plausible flats spanning the table above,
+   asserting it settles in all of them. If the restricted/four-person corner fails, widen the band
+   or lengthen the down-dwell. This happens before the thing is ever installed.
+2. **Measure it after a week of logs.** CO₂ settling points at several levels give real airflow and
+   real authority, and the band is recomputed from observation. Every assumption above then drops
+   out.
+
+If the restricted corner turns out to be real, four people may keep CO₂ above ~900 ppm even at
+level 80. The unit will sit pinned at the ceiling, and that is correct behaviour — a capacity
+problem, not a control one, which is what the pinned-at-ceiling diagnostic exists to surface.
 
 **Droop is intentional.** The unit settles wherever ventilation balances CO₂ production — inside
 the band, not at a target number. ASHRAE's framing is that CO₂ is a **limit, not a setpoint**:
@@ -558,8 +612,7 @@ on Netatmo's repeated readings.
 asymmetry, not something invented here. Guideline 36 Addendum q (2024) specifies P-only for CO₂
 and states the reason: CO₂ is a limit to stay under, not a value to oscillate around. Hysteresis
 of 50–100 ppm at switching points is standard practice (Honeywell Jade uses 100). The one place
-this design departs from commercial convention is band width, and that departure is derived above
-rather than chosen.
+this design departs from commercial convention is band width, for the reason set out above.
 
 **Every decision carries its reasoning.** `ControlOutcome` includes the reasons that produced it,
 and those surface in `/api/state` and the logs. A decision you cannot explain after the fact is a
@@ -651,12 +704,17 @@ The last two are **not tuning knobs.** 20 is what the unit does; 80 is what the 
 this flat allows. Everything above is a preference to be adjusted against real readings; these two
 describe the world and should only change if the hardware does.
 
-**The band is derived, not tuned.** `C_HI − C_LO` must be at least the CO₂ swing the unit can
-produce between level 20 and level 80 at design occupancy (~650 ppm here), or the loop gain
-exceeds 1 and it hunts no matter how much hysteresis is added. If the band is ever narrowed,
-recompute the gain — do not nudge the numbers. `C_HI = 1250` also matches EN 16798-1 Category II
-(800 ppm above outdoors). `CO2_HYSTERESIS` follows from the band: step width is 700/6 ≈ 117 ppm,
-and half a step is the conventional size.
+**The band is sized by a rule, not tuned by feel** — but the number it produces is currently an
+estimate, not a measurement. `C_HI − C_LO` must be at least the CO₂ swing the unit can produce
+between level 20 and level 80 at design occupancy, or loop gain exceeds 1 and it hunts no matter
+how much hysteresis is added. That swing is somewhere between ~350 and ~1100 ppm for this flat
+(see "What is actually known" above), so 700 is a middle bet validated by a sensitivity sweep
+rather than a derived certainty. `C_HI = 1250` also matches EN 16798-1 Category II (800 ppm above
+outdoors). `CO2_HYSTERESIS` follows from the band: step width is 700/6 ≈ 117 ppm, and half a step
+is the conventional size.
+
+**Recompute the band from logged data once a week of readings exists.** Settling points at several
+levels give real airflow and real authority, which replaces every assumption behind the 700.
 
 **Minimum dwell has a floor**, not just a default: it may never be set below the slowest CO₂
 source's refresh interval (8 minutes for Netatmo). Below that the controller acts before it can
