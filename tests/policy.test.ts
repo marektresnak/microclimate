@@ -182,11 +182,27 @@ describe('hysteresis', () => {
   it('gives the same reading opposite answers depending on where the fan is', () => {
     // Nothing else in the controller behaves like this, and it is the whole
     // point: 850 ppm while running low stays low, while running high stays high.
-    const runningLow = snapshotOf({ bedroom: fresh('bedroom_netatmo', 850), currentLevel: 40 });
-    const runningHigh = snapshotOf({ bedroom: fresh('bedroom_netatmo', 850), currentLevel: 50 });
+    //
+    // Both readings are needed, and one is not enough. 850 is above the boundary,
+    // so the raw band already answers 50 and only the *upward* bias is doing work
+    // there; 822 is below it, so only the downward bias is. Assert one of them
+    // and half the mechanism can be deleted without a test noticing.
+    const above = 850;
+    const below = 822;
 
-    assert.equal(decide(runningLow, WINTER_MIDDAY).desiredLevel, 40);
-    assert.equal(decide(runningHigh, WINTER_MIDDAY).desiredLevel, 50);
+    assert.equal(decide(snapshotOf({ bedroom: fresh('bedroom_netatmo', above), currentLevel: 40 }), WINTER_MIDDAY).desiredLevel, 40);
+    assert.equal(decide(snapshotOf({ bedroom: fresh('bedroom_netatmo', above), currentLevel: 50 }), WINTER_MIDDAY).desiredLevel, 50);
+    assert.equal(decide(snapshotOf({ bedroom: fresh('bedroom_netatmo', below), currentLevel: 40 }), WINTER_MIDDAY).desiredLevel, 40);
+    assert.equal(decide(snapshotOf({ bedroom: fresh('bedroom_netatmo', below), currentLevel: 50 }), WINTER_MIDDAY).desiredLevel, 50);
+  });
+
+  it('does not flutter when a reading wobbles across a boundary from above', () => {
+    // The mirror of the case below it. Running at 50, a reading that dips under
+    // the boundary but not past the hysteresis must not drag the level down.
+    for (const co2 of [BOUNDARY_40_50 + 20, BOUNDARY_40_50, BOUNDARY_40_50 - 20]) {
+      const snapshot = snapshotOf({ bedroom: fresh('bedroom_netatmo', co2), currentLevel: 50 });
+      assert.equal(decide(snapshot, WINTER_MIDDAY).desiredLevel, 50, `${co2} ppm moved the level`);
+    }
   });
 
   it('does not flutter when a reading wobbles across a boundary', () => {

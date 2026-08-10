@@ -377,7 +377,10 @@ CO₂ authority (~1070 ppm) exceeds the 700 ppm band. If it does fail, widen the
 - the band maps linearly in between — table-driven across the seven steps
 - **monotonic**: higher CO₂ never produces a lower level (property-style, table-driven)
 - **hysteresis at a step boundary**: sitting exactly on a boundary and wobbling ±20 ppm produces
-  no change; crossing it by more than 60 ppm does
+  no change; crossing it by more than 60 ppm does. **Assert it from both sides.** A reading above
+  the boundary is already answered by the raw band when the fan is high, so that case exercises
+  only the upward bias; the downward bias needs a reading *below* the boundary while running high.
+  One side alone leaves half the mechanism deletable without a test noticing.
 - **the loop-gain guard**: assert that `C_HI - C_LO` is at least the fan authority currently
   believed, so a future narrowing of the band fails loudly rather than quietly oscillating in the
   flat. Written as a test rather than a runtime check at config load: the authority is an estimate
@@ -534,8 +537,19 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
   it at 90 or 100; if that read fails, the safe default stands in
 - **the read-back is reported, not acted on** (S1): move the fake unit's level by hand, and the
   loop logs the disagreement while its decision continues from its own last commanded value
-- **the pinned-at-ceiling diagnostic** fires once after 10 minutes at the ceiling with CO₂ above
-  `C_HI` + 10%, and not before, and not again until the condition clears
+- **the loop carries `wasSleeping` and `lastChangeAt` from one tick to the next.** Both need a test
+  *here* and not only in the traces: the trace harness threads that state itself, so it goes on
+  passing when the loop stops threading it. Wiring that the tests re-implement is wiring that is
+  not tested. The two cases are the 07:00 cap hold across real ticks, and twenty minutes of
+  evaluations producing three steps down rather than six.
+- **the pinned-at-ceiling diagnostic** fires after 10 minutes at the ceiling with CO₂ above
+  `C_HI` + 10%, and not before; it repeats at most once per window while the condition lasts; and
+  the 10 minutes start again from the moment it clears. Three assertions rather than one, because
+  the middle one is the difference between an alarm and a note, and the last one is a mutation the
+  first two do not catch.
+- **the margin is pinned, not merely present.** The "merely bad air" case has to run against a
+  source that keeps reporting, or the reading goes stale, the alarm is disarmed by staleness rather
+  than by the threshold, and the assertion holds however wrong the threshold is.
 
 ## `http/server.ts`
 

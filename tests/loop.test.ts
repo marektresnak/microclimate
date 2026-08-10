@@ -24,6 +24,32 @@ function co2Source(name: string, value: number, measuredAt: number): SensorSourc
   };
 }
 
+/**
+ * A source that reports whatever `ppm` currently says, stamped with the time it
+ * was asked. Needed wherever a test runs for longer than the freshness window:
+ * with a fixed `measuredAt`, the reading goes stale and the loop stops seeing
+ * CO2 at all, which quietly satisfies assertions for the wrong reason.
+ */
+interface LiveSource {
+  readonly source: SensorSource;
+  ppm: number;
+}
+
+function liveCo2Source(name: string, ppm: number): LiveSource {
+  const live: LiveSource = {
+    ppm,
+    source: {
+      name,
+      pollIntervalMs: MINUTE,
+      async poll(now: number): Promise<readonly Reading[]> {
+        return [reading('bedroom_netatmo', 'co2', live.ppm, now)];
+      },
+    },
+  };
+
+  return live;
+}
+
 function brokenSource(name: string): SensorSource {
   return {
     name,
@@ -233,39 +259,126 @@ describe('the control loop', () => {
     // 1400 ppm is above C_HI + 10%, and the fan is already at its ceiling. That
     // is the intake grille or too many people, not a control failure.
     const store = openReadingStore(':memory:');
-    const unit = createFakeUnit(80);
+    const live = liveCo2Source('netatmo', 1400);
     const log = recorder();
     const loop = createControlLoop({
-      sources: [co2Source('netatmo', 1400, MIDDAY)],
-      store,
-      unit,
-      log: log.log,
-    });
-
-    await loop.tick(MIDDAY);
-    await loop.tick(MIDDAY + 9 * MINUTE);
-    assert.doesNotMatch(log.lines.join('\n'), /capacity problem/);
-
-    await loop.tick(MIDDAY + 10 * MINUTE);
-    assert.match(log.lines.join('\n'), /pinned at 80% with 1400 ppm in the bedroom/);
-
-    store.close();
-  });
-
-  it('does not report a capacity problem while the air is merely bad', async () => {
-    const store = openReadingStore(':memory:');
-    const log = recorder();
-    const loop = createControlLoop({
-      sources: [co2Source('netatmo', 1300, MIDDAY)],
+      sources: [live.source],
       store,
       unit: createFakeUnit(80),
       log: log.log,
     });
 
     await loop.tick(MIDDAY);
-    await loop.tick(MIDDAY + 30 * MINUTE);
+    await loop.tick(MIDDAY + 9 * MINUTE);
+    assert.equal(capacityReports(log), 0, 'reported before the ten minutes were up');
 
-    assert.doesNotMatch(log.lines.join('\n'), /capacity problem/);
+    await loop.tick(MIDDAY + 10 * MINUTE);
+    assert.equal(capacityReports(log), 1);
+    assert.match(log.lines.join('\n'), /pinned at 80% with 1400 ppm in the bedroom/);
+
+    store.close();
+  });
+
+  it('keeps saying so while it lasts, at most once per window', async () => {
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 1400);
+    const log = recorder();
+    const loop = createControlLoop({
+      sources: [live.source],
+      store,
+      unit: createFakeUnit(80),
+      log: log.log,
+    });
+
+    for (let minute = 0; minute <= 30; minute += 0.5) {
+      await loop.tick(MIDDAY + minute * MINUTE);
+    }
+
+    assert.equal(capacityReports(log), 3);
+    store.close();
+  });
+
+  it('starts the clock again once the condition clears', async () => {
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 1400);
+    const log = recorder();
+    const loop = createControlLoop({
+      sources: [live.source],
+      store,
+      unit: createFakeUnit(80),
+      log: log.log,
+    });
+
+    await loop.tick(MIDDAY);
+    await loop.tick(MIDDAY + 10 * MINUTE);
+    assert.equal(capacityReports(log), 1);
+
+    // Still demanding the ceiling, but back inside the margin, so the unit is no
+    // longer out of capacity — it is merely working hard.
+    live.ppm = 1300;
+    await loop.tick(MIDDAY + 11 * MINUTE);
+
+    live.ppm = 1400;
+    await loop.tick(MIDDAY + 12 * MINUTE);
+    await loop.tick(MIDDAY + 20 * MINUTE);
+    assert.equal(capacityReports(log), 1, 'the ten minutes started again from the clearing');
+
+    await loop.tick(MIDDAY + 22 * MINUTE);
+    assert.equal(capacityReports(log), 2);
+
+    store.close();
+  });
+
+  it('does not report a capacity problem while the air is merely bad', async () => {
+    // 1300 ppm is above the band and below the margin. The unit sitting at its
+    // ceiling here is the design working, not the unit running out of air.
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 1300);
+    const log = recorder();
+    const loop = createControlLoop({
+      sources: [live.source],
+      store,
+      unit: createFakeUnit(80),
+      log: log.log,
+    });
+
+    for (let minute = 0; minute <= 30; minute += 1) {
+      await loop.tick(MIDDAY + minute * MINUTE);
+    }
+
+    assert.equal(capacityReports(log), 0);
+    store.close();
+  });
+
+  it('carries the sleep state from one tick to the next', async () => {
+    // The R1 regression, at the level the loop is responsible for: the extender
+    // only works if the loop remembers what the last cycle decided. Keyed to the
+    // clock alone, this jumps to 80 at 07:00 into a bedroom of sleeping people.
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 1300);
+    const unit = createFakeUnit(20);
+    const loop = createControlLoop({ sources: [live.source], store, unit, log: recorder().log });
+
+    await loop.tick(Date.UTC(2026, 0, 15, 5, 50)); // 06:50 Prague, inside quiet hours
+    await loop.tick(Date.UTC(2026, 0, 15, 6, 5)); // 07:05 Prague, and the room has not cleared
+
+    assert.deepEqual(unit.commands, [CONTROL.sleepMaxLevel]);
+    store.close();
+  });
+
+  it('carries the dwell timer from one tick to the next', async () => {
+    // Twenty minutes of evaluations every thirty seconds. If the loop forgot when
+    // it last changed, the whole range would be given back inside three minutes.
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 500);
+    const unit = createFakeUnit(80);
+    const loop = createControlLoop({ sources: [live.source], store, unit, log: recorder().log });
+
+    for (let minute = 0; minute <= 20; minute += 0.5) {
+      await loop.tick(MIDDAY + minute * MINUTE);
+    }
+
+    assert.deepEqual(unit.commands, [70, 60, 50]);
     store.close();
   });
 
@@ -301,4 +414,8 @@ describe('the control loop', () => {
 
 function reading(sourceId: SensorId, kind: MeasurementKind, value: number, measuredAt: number): Reading {
   return { sourceId, kind, value, measuredAt, receivedAt: measuredAt };
+}
+
+function capacityReports(log: Recorder): number {
+  return log.lines.filter((line) => line.includes('a capacity problem')).length;
 }

@@ -790,9 +790,16 @@ an hour twice a year if the host were ever UTC. `Europe/Prague` is where the fla
 conversion goes through `Intl.DateTimeFormat`, which handles the DST transitions for free.
 
 **One diagnostic, built:** CO₂ above `C_HI` + 10% for more than 10 minutes while pinned at the
-ceiling → log it once. That is a capacity problem (or the intake grille), not something the
-controller can fix by trying harder, and ASHRAE Guideline 36 specifies it. It is the only piece of
-state in the loop that is not the control decision itself.
+ceiling → log it. That is a capacity problem (or the intake grille), not something the controller
+can fix by trying harder, and ASHRAE Guideline 36 specifies it. It is the only piece of state in
+the loop that is not the control decision itself.
+
+**It repeats once per ten-minute window while the condition lasts**, and the ten minutes start
+again from the moment it clears. An earlier draft said "log it once", which is what an alarm does
+when it is trying not to be noisy — but this one is not noisy next to 120 decision lines an hour,
+and a single line eight hours ago does not tell you the flat is *still* out of capacity. Latching
+it would also have cost a second piece of state next to `pinnedSince` purely to remember that we
+had already spoken. One variable, and an alarm that behaves like an alarm.
 
 **One diagnostic, deferred with the module it belongs to:** any reading **below 300 ppm** is a
 probable calibration fault — NDIR sensors self-calibrate by assuming they periodically see outdoor
