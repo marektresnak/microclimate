@@ -112,16 +112,21 @@ function inQuietHours(now: number): boolean {
   return hour >= CONTROL.quietHoursStartHour || hour < CONTROL.quietHoursEndHour;
 }
 
-interface WorstReading {
+export interface WorstReading {
   readonly room: RoomId;
   readonly sourceId: SensorId;
   readonly value: number;
 }
 
-// Worst room wins. Stale and missing readings are excluded entirely, in both
-// directions: a stale low reading is never treated as good air, and a stale high
-// one never pins the unit at the ceiling.
-function worstFreshCo2(co2ByRoom: Record<RoomId, RoomSignal>): WorstReading | undefined {
+/**
+ * Worst room wins. Stale and missing readings are excluded entirely, in both
+ * directions: a stale low reading is never treated as good air, and a stale high
+ * one never pins the unit at the ceiling.
+ *
+ * Exported because the pinned-at-the-ceiling diagnostic asks the same question
+ * the demand curve does, and two answers to it could disagree.
+ */
+export function worstFreshCo2(co2ByRoom: Record<RoomId, RoomSignal>): WorstReading | undefined {
   let worst: WorstReading | undefined;
 
   for (const room of ROOM_IDS) {
