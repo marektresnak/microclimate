@@ -79,6 +79,14 @@ no flags and no build step:
   `--noEmit` typechecking.
 - `node:test` + `node:assert/strict` — no vitest, no jest.
 
+**`npm test` runs `tsc --noEmit` first, and that is not a convenience.** Type stripping deletes the
+types without ever checking them, so nothing at runtime enforces `CommandedLevel` — and
+`CommandedLevel` is the entire guard against commanding 90 or 100 into a restricted intake grille.
+A suite that runs green without a typecheck is a suite that would not notice the guard had gone.
+The Modbus adapter carries a runtime range assertion at the write site for the same reason: the
+one place where a number leaves the type system and becomes bytes on a wire deserves a belt as
+well as braces.
+
 Runtime dependencies so far: **none.** `fetch` and `node:http` are built in.
 
 This is deliberate. Every dependency is something I would have to defend in an interview and
@@ -128,21 +136,23 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   flat cannot pass enough air above roughly 80%, so running higher makes the fan work against a
   restriction: noisy, inefficient, and it unbalances supply against extract on a heat-recovery
   unit. The device would accept 90 and 100. **We never send them.**
-- There is a wall panel. Someone may change the level by hand. **We reassert our decision on the
-  next cycle** — we do not yield to manual changes. A hand-set 90 or 100 is therefore pulled back
-  under the ceiling, which is intended.
+- There is a wall panel. Someone may change the level by hand. **We do not track it and we do not
+  correct it.** We read the actual level back every tick and report it next to the desired level in
+  `/api/state`, so a mismatch is visible — but the controller decides from its own last commanded
+  value and nothing else. A hand-set level therefore survives until our decision changes, and is
+  overwritten silently when it does.
 
-  Decided knowingly, and re-affirmed after two independent reviews argued against it. The cost is
-  that a hand-set level is overwritten within 30 seconds, so the panel cannot be used to quieten
-  the unit. The damage is bounded by sleep detection: whenever someone is actually asleep — by
-  quiet hours or by bedroom CO₂ — the service cannot command above `sleepMaxLevel`, so the worst
-  case is a hand-set 30 being pushed back to 50, not to 80. **If 50 proves audible, lower
-  `sleepMaxLevel`; do not add manual-override detection without revisiting this deliberately.**
+  This is a deliberate simplification, and it has a known cost. An earlier revision reconciled the
+  read-back every tick specifically so that a hand-set 80 at 23:30 could not run all night while
+  the log reported *"level 50, no change needed"*. That case is now real again: with the target
+  equal to what we last commanded, we write nothing, and the hand-set level stands. **The mismatch
+  is visible in `/api/state` and in the logs; it is simply not acted on.**
 
-  Note the dependency: an earlier revision deleted CO₂ sleep inference, which removed the cap
-  outside quiet hours and quietly invalidated this reasoning — the worst case briefly became a
-  hand-set 20 pushed to 80 during an afternoon nap. Restoring CO₂ inference restored the bound.
-  **If the sleep rule is ever weakened again, this decision has to be re-examined with it.**
+  Two mechanisms were removed to buy that: the tick-by-tick comparison, and the cap-breach
+  correction path that hung off it. What is left is one rule — *decide, and write when the decision
+  changes* — which is the thing that has to be explained in an interview. If living with the unit
+  shows that hand-set levels are a real nuisance rather than a hypothetical one, the honest fix is
+  to reinstate read-back reconciliation as a single mechanism, not to add a detector for it.
 - **If the service dies, the unit holds its last commanded level indefinitely.** There is no
   watchdog and we do not set a safe level on shutdown. A crash at 21:30 with the unit at 80 leaves
   it audible all night, and the next night too. Accepted, and re-affirmed after a reviewer pressed
@@ -255,19 +265,17 @@ Never store a value in anything else. Conversion happens in the adapter, at the 
 only CO₂ drives the unit. Collection is the point of the system — do not "optimise" the unused
 kinds away.
 
-**A second, tiny table holds controller state that must survive a restart:**
+**There is no second table.** The controller's working state — last commanded level, when it last
+changed, whether the previous cycle was asleep — lives in memory and is lost on restart. A restart
+therefore acts immediately rather than waiting out a dwell period.
 
-```sql
-CREATE TABLE control_state (
-  id                 INTEGER PRIMARY KEY CHECK (id = 1),  -- exactly one row
-  last_change_at     INTEGER,                             -- epoch ms, UTC
-  last_commanded     INTEGER
-) STRICT;
-```
-
-One row, enforced by the `CHECK`. Without it a crash loop resets the dwell on every start and
-becomes one change per restart instead of one per ten minutes. This is the only mutable state in
-the system; everything else is append-only.
+An earlier revision persisted the last change in a `control_state` table, on the grounds that a
+crash loop would otherwise make one change per restart instead of one per ten minutes. The table
+came with a clamp on read (a future timestamp made the dwell never expire), and a rule that an
+unreadable row is an error rather than a first run — two guards protecting one guard. **All three
+are removed.** The database is now append-only with no mutable row in it at all, which is a
+property worth more than the failure mode it gives up. A service that crash-loops is a problem to
+fix, not a problem to rate-limit.
 
 ## Topology lives in config, not the database
 
@@ -368,37 +376,37 @@ differently because they are next to different radiators, and a mean describes n
 src/
   config.ts             SOLE source of truth for topology: rooms, sensors
                         (with isActive), per-(room, kind) precedence, freshness
-                        windows, thresholds — all `as const`
+                        windows, thresholds — all `as const`. RoomId and SensorId
+                        are derived from it, so a typo is a compile error.
   domain/
-    measurement.ts      MeasurementKind, Reading, RoomId, SensorId
-    level.ts            Level + narrowing
+    measurement.ts      MeasurementKind, Reading
+    level.ts            Level, CommandedLevel, narrowing, one step up/down
     signal.ts           RoomSignal — fresh | stale | missing
-    decision.ts         Decision, ControlOutcome
+    decision.ts         Snapshot, Decision, ControlOutcome
     precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
                         Shared by the controller and /api/state — one rule.
   sources/
-    source.ts           SensorSource interface, PollResult
-    tado.ts             pull adapter
-    netatmo.ts          pull adapter
-  ingest/
-    http.ts             POST /api/readings — batched, idempotent, timestamp-validated
-  store/
-    readings.ts         node:sqlite; append-only, no pruning path exists yet
-    control-state.ts    the one mutable row: last change, last commanded
-  sources/
+    source.ts           SensorSource interface
     synthetic.ts        plausible CO₂ curves on a schedule, so `npm start` runs
                         without hardware. A demo, not a plant model.
+    tado.ts             pull adapter                          (not built yet)
+    netatmo.ts          pull adapter                          (not built yet)
+  ingest/
+    http.ts             POST /api/readings                    (not built yet)
+  store/
+    readings.ts         node:sqlite; append-only, no pruning path exists yet.
+                        The only table there is.
   control/
     freshness.ts        PURE. reading + now + per-source window -> RoomSignal
-    policy.ts           PURE. snapshot -> desired Level + reasons
-    limiter.ts          PURE. desired + current + last-change -> ControlOutcome
+    policy.ts           PURE. snapshot -> desired Level + sleeping + reasons
+    limiter.ts          PURE. decision + current + last-change -> ControlOutcome
     loop.ts             orchestration: poll -> store -> decide -> actuate
   actuator/
     unit.ts             VentilationUnit interface
-    modbus-tcp.ts       real implementation, FC3 + FC6
+    modbus-tcp.ts       real implementation, FC3 + FC6        (not built yet)
     fake.ts             test double, records calls
   http/
-    server.ts           the read API
+    server.ts           the read API                          (not built yet)
   main.ts               wiring only
 tests/
 ```
@@ -429,39 +437,42 @@ Pipeline, in order:
    trust, and trust is what matters while a choice between *live* instruments exists. Once nothing
    is fresh there is no such choice, only the question of what the best remaining information is —
    and that is the newest reading, not the most trusted dead one.
-2. **Sleep detection.** Asleep if *either*:
-   - inside fixed quiet hours (config, default 22:00–07:00), **or**
-   - **bedroom** CO₂ is fresh and above `SLEEP_CO2` (700 ppm).
+2. **Sleep detection. Quiet hours assert it; bedroom CO₂ only extends it.**
 
-   Sleep **de-asserts only after bedroom CO₂ has been below 700 for 10 continuous minutes**
-   (`SLEEP_RELEASE_MINUTES`). Without that hold it chatters as the room clears in the morning,
-   which is exactly when CO₂ crosses the threshold slowly, and a door opened for a minute would
-   drop the cap.
+   ```
+   sleeping = inQuietHours(now) || (wasSleeping && bedroomCo2 is fresh && bedroomCo2 > SLEEP_CO2)
+   ```
 
-   **Why CO₂ is a valid occupancy signal here, when in general it is not.** This bedroom is never
-   *merely* occupied — nobody sits in it. CO₂ above 700 ppm in that room means someone is
-   sleeping. That is a fact about this flat, not a general principle, and it is the entire
-   justification for the rule. If the room's use ever changes, delete this clause.
+   `wasSleeping` is the previous cycle's value, held in memory. Nothing else asserts sleep.
 
-   The open window case is not covered — someone asleep with the window open may exceed 700
-   without a cap applying, or clear below it while still asleep. Accepted: an open window already
-   admits more noise than the unit makes.
+   **Why the CO₂ term is an extender and not an assertion.** Asserting on CO₂ alone self-latches.
+   The band puts level 50 at roughly 900 ppm, so *any* CO₂ high enough to demand more than 50 has
+   already crossed 700 and capped the response at 50 — the demand signal and the occupancy signal
+   are the same number, and the one silences the other. With the bedroom door open, an ordinary
+   busy evening drives bedroom CO₂ past 700 with nobody in bed, and the flat is then pinned at 50
+   with no way to earn its way out. As an extender the term cannot false-trigger, because it
+   requires having already been asleep.
 
-   Quiet hours remains as the second, sensor-independent guarantee, so a dead Netatmo can never
-   let the unit run loud at 3am.
+   **What the term is for**, and it is worth keeping for exactly this: the cap must lift when the
+   room clears, not when the clock strikes. Keyed to the clock alone, the level would jump at
+   07:00 into a bedroom where people are still asleep. Two independent reviewers found that
+   regression by reasoning, and it is the one behaviour the scripted traces exist to pin.
 
-   **A previous revision deleted this clause**, on the grounds that bedroom CO₂ was simultaneously
-   the demand signal and the occupancy signal, so anything creating demand also asserted sleep.
-   That is true, and it is *intended*: when someone is asleep in the bedroom, the response should
-   be capped, and levels above 50 being unreachable is the requirement rather than a defect. The
-   scenario used to condemn it — kids playing in the bedroom at 1100 ppm on a Saturday afternoon —
-   does not occur in this flat.
+   The bedroom is never merely occupied in this flat — nobody sits in it — which is what makes
+   CO₂ readable as *still asleep* at all. That is a fact about this flat, not a general principle.
+   If the room's use changes, delete the clause.
 
-   Deleting it also caused a regression: with the cap keyed to the clock alone, the loop's
-   internal level tracked to 70–80 overnight and released in one move at 07:00, into a bedroom
-   where people were still asleep. It fired *only* when the requirement was active — had they
-   woken and opened the door, CO₂ would have collapsed and the level walked down first. Keying the
-   cap to CO₂ instead of a clock means it lifts when the room actually clears.
+   **Two accepted losses, both consequences of the extender form:**
+   - **An afternoon nap gets no cap.** Sleep was not already asserted, so nothing extends. Someone
+     napping at 15:00 can hear the unit at up to 80.
+   - **A restart while asleep after 07:00 drops the cap.** `wasSleeping` starts false, quiet hours
+     have ended, so the extender cannot re-latch until 22:00.
+
+   Quiet hours is the sensor-independent guarantee underneath all of this: a dead Netatmo can
+   never let the unit run loud at 3am, because that path does not consult a sensor at all.
+
+   The open-window case is not covered either — someone asleep with the window open clears below
+   700 and loses the cap. Accepted: an open window already admits more noise than the unit makes.
 3. **Demand — a proportional band.** Highest fresh CO₂ across all rooms drives the target; worst
    room wins. Stale and missing readings are excluded entirely, **in both directions**: a stale low
    reading is never treated as good air, and a stale high one never pins the unit at the ceiling.
@@ -483,88 +494,75 @@ Pipeline, in order:
    This replaces an earlier "boost above 800, release below 650" band, which was a *binary*
    trigger dressed as a deadband and contradicted the proportional curve specified two lines
    above it. One mechanism now, not two.
-6. **Sleep cap — applied *after* the loop, as a clamp on the output.**
+6. **Sleep cap.** The whole cap lives in `limiter.ts`, in one place, and it is applied to **where
+   the unit is**, not only to a newly computed target:
 
    ```
-   out = sleeping ? min(level, sleepMaxLevel) : level
+   cap    = sleeping ? sleepMaxLevel : MAX_COMMANDED_LEVEL
+   if current > cap  -> command cap now, in one move
+   target = min(desired, cap)
    ```
 
    Three properties, all of which matter:
-   - **It clamps the output, not the loop's internal `level`.** The proportional loop keeps
-     tracking real demand all night, so the 07:00 release is a return to what demand already was,
-     not a surprise jump.
-   - **It does not update `lastChangeAt`.** Otherwise the cap re-triggers every cycle through the
-     night and permanently resets the dwell timer.
-   - **It bypasses dwell and is not rate-limited.** A unit at 70 when quiet hours begin drops to
-     50 immediately, in one move. Evening cooking leaving it at 70 must not run all night because
-     demand sat mid-range and produced no new target. A hard requirement does not wait on a rate
-     limiter.
-7. **Rate limit — asymmetric, but bounded in both directions.**
-   - **Increases move one step per `UP_STEP_SECONDS` (90 s).** A 20 → 80 climb ramps over about
-     four and a half minutes.
+   - **`policy.ts` never applies the cap.** It reports demand and whether we are asleep, and the
+     limiter clamps. One rule, one place — a cap applied in both modules is two mechanisms that
+     have to agree.
+   - **It bypasses the rate limit.** A unit at 70 when quiet hours begin drops to 50 immediately,
+     in one move. Evening cooking leaving it at 70 must not run all night because demand sat
+     mid-range and produced no new target. A hard requirement does not wait on a rate limiter.
+   - **It does not update `lastChangeAt`.** Otherwise the drop at 22:00 also starts a fresh dwell,
+     and the genuine walk down that follows it is delayed by ten minutes for no reason.
+7. **Rate limit — asymmetric. Only decreases are limited.**
+   - **Increases apply immediately, at any distance.** Demand at 80 from a current 20 commands 80
+     on that cycle.
    - **Decreases move one step per `minDwellMinutes` (10 min).** The slow retreat is what stops
-     CO₂ crashing and rebounding into the next boost.
+     CO₂ crashing and rebounding into the next boost, and it is the damper that keeps a
+     mis-sized band degrading into slow drift rather than a square wave.
    - The sleep cap in step 6 is **not** a decrease for this purpose. It is immediate and unlimited.
 
-   **Increases were previously unbounded**, and that was wrong on the requirement's own terms. The
-   hard requirement is *not audible*, which makes **up** the dangerous direction and **down** the
-   safe one — the design bounded the safe one and left the dangerous one free. Concretely, an
-   empty flat at level 20 with two people arriving at 23:00 would jump **20 → 50 in a single
-   cycle** as they fell asleep, and a step change in fan noise is far more noticeable than a ramp
-   to the same level.
+   **This is the only timing rule in the controller.** An earlier revision had two — a dwell that
+   gated every change, plus a separate one-step-per-90s limit on increases — and they overlapped
+   on the down side while contradicting each other on the up side. There is now one clock:
+   *how long since the level last changed*, consulted only when going down.
 
-   Ramping costs nothing in control terms: the CO₂ signal already lags 7–8 minutes, so a
-   four-minute climb is invisible against it. It also fixes an authority blowout waiting at the
-   SEN66 transition — Netatmo offers ~8 upward opportunities an hour, three SEN66 nodes behind a
-   max offer ~120, while release stays at one step per 10 minutes. Unbounded increases against a
-   fast signal would leave the unit living at its ceiling.
+   Bounding increases was argued for on noise grounds: a step change in fan speed is more
+   noticeable than a ramp to the same level. That is true and it is given up knowingly. It bought
+   a four-and-a-half-minute climb from 20 to 80 at the cost of a second timer, a second config
+   value, and a rule that reads as symmetric while behaving asymmetrically. **Up is the direction
+   where the air is already bad**; making it wait is the wrong instinct even when it is quieter.
+   If the ramp turns out to be audibly necessary, it comes back as one line in the limiter —
+   not as a second timing concept.
 
-   This replaces an earlier revision that had no rate limit at all. With only an input deadband,
-   demand crossing 800 slammed 20 → 80, the unit pulled CO₂ under 650 inside one dwell, and it
-   slammed back to 20 — a square wave with roughly a twenty-minute period, which is precisely the
-   behaviour this project exists to eliminate.
+   What must *not* come back is the version with no limit in either direction. With only an input
+   deadband, demand crossing 800 slammed 20 → 80, the unit pulled CO₂ under 650 inside one dwell,
+   and it slammed back to 20 — a square wave with roughly a twenty-minute period, which is
+   precisely the behaviour this project exists to eliminate. The one-step-per-dwell *decrease* is
+   what kills that, and it is retained.
 
    The confusion that produced that gap is worth recording, because the two rules sound alike and
    are opposites: *"must differ by more than one step to change at all"* creates a dead zone and
    was rightly removed (Q2); *"may move at most one step per change"* is rate limiting and is what
    was actually needed. Removing the first was mistaken for having the second.
-8. **Dwell.** Do not change if the last change was less than `minDwellMinutes` ago. Dwell is
-   measured from the last actual **change**, never from the last evaluation — otherwise evaluating
-   every 30 s resets the timer forever and nothing ever moves.
 
-   **The last change is persisted** (`control_state`), so a restart does not reset it. A genuinely
-   first run acts immediately; a restart two minutes after a change waits out the remaining eight.
-   Without persistence a crash loop becomes one change per restart rather than one per ten minutes.
+   **The decrease interval must be at least as long as the slowest CO₂ source's refresh
+   interval.** Netatmo updates every 7–8 minutes, so anything shorter would step down again before
+   the effect of the last step could possibly be observed. Ten minutes satisfies this; it is a
+   constraint, not a coincidence, and it moves if the sensor fleet does.
 
-   **Clamp the persisted value on read.** If `last_change_at` is in the future, or more than 24
-   hours old, treat the dwell as expired. A machine whose clock has not yet synced makes
-   `now − last_change_at` negative, and an unclamped dwell then *never* expires — the level can
-   only ever go up, permanently, and surviving a reboot. That is a strictly worse failure than the
-   one persistence was added to fix, which at least self-healed.
+   **The timer is in memory and resets on restart.** A restart therefore acts immediately, which
+   is also what a genuine first run does (Q4). See "Data model" for why the table that used to
+   persist it is gone.
+8. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80). The type
+   does this at compile time; `assertCommandedLevel` does it at runtime for anything crossing a
+   boundary, because type stripping performs no checking at all.
+9. **Read the unit's actual level back every tick** (FC3, already verified) and report it. It is
+   surfaced next to the desired level in `/api/state` and logged when the two disagree, which is
+   the only way to see that someone used the wall panel. **The controller does not act on it** —
+   see the actuator section for what that costs.
 
-   **A state row that cannot be read is an error, not a first run.** A missing volume mount or a
-   read-only filesystem would otherwise look like a genuine first start on every restart, silently
-   restoring the crash-loop bug with the fix nominally in place and nobody looking for it.
-
-   **Dwell must be at least as long as the slowest CO₂ source's refresh interval.** Netatmo
-   updates every 7–8 minutes, so a shorter dwell would act again before the effect of the last
-   change could possibly be observed. Ten minutes satisfies this; it is a constraint, not a
-   coincidence, and it moves if the sensor fleet does.
-9. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80).
-10. **Read the unit's actual level back every tick** (FC3, already verified) and compare it to
-    `last_commanded`. A mismatch means a human used the wall panel.
-    - If the actual level **breaches the sleep cap**, correct it immediately, in one move, through
-      the cap path — not rate-limited.
-    - Otherwise the normal rules apply on the next decision.
-
-    Without this the loop compares its computed target to `last_commanded`, finds them equal,
-    writes nothing — and a hand-set 80 runs all night while the log reports *"level 40, no change
-    needed"*. The violation would be invisible in exactly the case that matters.
-
-**On steps 3, 5, 7 and 8 together:** settling needs all four. The band's *width* sets the loop
-gain and is what makes convergence provable; hysteresis stops boundary chatter; the asymmetric
-rate limit stops the swing; dwell stops the twitch. The band is doing the real work — the other
-three are polish on top of a loop that is already stable.
+**On steps 3, 5 and 7 together:** the band's *width* sets the loop gain and is what makes
+convergence provable; hysteresis stops boundary chatter; the one-step-per-dwell decrease stops the
+swing and is the backstop if the band turns out too narrow. The band is doing the real work.
 
 ## Why this control law, in plain terms
 
@@ -757,13 +755,11 @@ Starting defaults, all to be tuned against reality:
 | `C_LO` — band bottom, level 20 | 550 ppm | **derived** |
 | `C_HI` — band top, level 80 | 1250 ppm | **derived** |
 | `CO2_HYSTERESIS` | 60 ppm | derived (≈ ½ step) |
-| `SLEEP_CO2` — bedroom, asserts sleep | 700 ppm | tune |
-| `SLEEP_RELEASE_MINUTES` — hold below before de-assert | 10 min | tune |
-| Quiet hours | 22:00–07:00 | tune |
+| `SLEEP_CO2` — bedroom, *extends* sleep | 700 ppm | tune |
+| Quiet hours, and the zone they are read in | 22:00–07:00, `Europe/Prague` | tune |
 | Sleep max level | 50 | tune |
 | Safe default level (no data) | 40 | tune |
 | `minDwellMinutes` — one step down | 10 minutes | tune, floor ≥ 8 min |
-| `UP_STEP_SECONDS` — one step up | 90 s | tune |
 | Control evaluation interval | 30 s | tune |
 | `MIN_LEVEL` | 20 | **physical** |
 | `MAX_COMMANDED_LEVEL` | 80 | **physical** |
@@ -785,19 +781,27 @@ is the conventional size.
 levels give real airflow and real authority, which replaces every assumption behind the 700.
 
 **Minimum dwell has a floor**, not just a default: it may never be set below the slowest CO₂
-source's refresh interval (8 minutes for Netatmo). Below that the controller acts before it can
-observe the last change.
+source's refresh interval (8 minutes for Netatmo). Below that the controller steps down again
+before it can observe the last step.
 
-**Two diagnostics worth having**, both cheap and both standard practice:
-- CO₂ above `C_HI` + 10% for more than 10 minutes while pinned at the ceiling → log it. That is a
-  capacity problem (or the intake grille), not something the controller can fix by trying harder.
-- Any reading **below 300 ppm** → flag as a probable calibration fault. NDIR sensors self-calibrate
-  by assuming they periodically see outdoor air; a flat that never gets down to outdoor CO₂ will
-  drift, and a drifted zero silently shifts the whole band.
+**Quiet hours carry an explicit IANA time zone.** Reading the hour out of the host's local time
+would make the tests depend on the machine they run on, and would silently shift the night cap by
+an hour twice a year if the host were ever UTC. `Europe/Prague` is where the flat is; the
+conversion goes through `Intl.DateTimeFormat`, which handles the DST transitions for free.
+
+**One diagnostic, built:** CO₂ above `C_HI` + 10% for more than 10 minutes while pinned at the
+ceiling → log it once. That is a capacity problem (or the intake grille), not something the
+controller can fix by trying harder, and ASHRAE Guideline 36 specifies it. It is the only piece of
+state in the loop that is not the control decision itself.
+
+**One diagnostic, deferred with the module it belongs to:** any reading **below 300 ppm** is a
+probable calibration fault — NDIR sensors self-calibrate by assuming they periodically see outdoor
+air, and a flat that never gets down to outdoor CO₂ will drift, shifting the whole band. That is a
+check on readings as they arrive, so it belongs in the ingest endpoint, which is not built.
 
 `SLEEP_CO2` at 700 ppm rests on a fact about this flat — the bedroom is never merely occupied, so
-CO₂ above 700 there means someone is asleep. It is not a general principle and does not transfer
-to a room people sit in.
+CO₂ above 700 there means someone is *still* asleep. It only extends a sleep that quiet hours
+already asserted; see the control logic for why it may not assert one on its own.
 
 ---
 
