@@ -385,8 +385,9 @@ src/
   store/
     readings.ts         node:sqlite; append-only, no pruning path exists yet
     control-state.ts    the one mutable row: last change, last commanded
-  sim/
-    room.ts             crude CO₂ model for the closed-loop settle test
+  sources/
+    synthetic.ts        plausible CO₂ curves on a schedule, so `npm start` runs
+                        without hardware. A demo, not a plant model.
   control/
     freshness.ts        PURE. reading + now + per-source window -> RoomSignal
     policy.ts           PURE. snapshot -> desired Level + reasons
@@ -646,12 +647,16 @@ The band handles stability when it is sized right; the rate limiter is the backs
 
 **How this gets resolved properly.** Two steps, in order:
 
-1. **Sweep the corners in the settle test** — four to six plausible flats spanning the table above,
-   asserting it settles in all of them. If the restricted/four-person corner fails, widen the band
-   or lengthen the down-dwell. This happens before the thing is ever installed.
+1. **Ship the estimate and instrument it.** The band is a middle bet across that range. Scripted
+   trace tests cover the controller's *sequence* behaviour, which needs no plant parameters at all;
+   convergence is the one question they cannot answer, and it is the one question that genuinely
+   needs the plant measured.
 2. **Measure it after a week of logs.** CO₂ settling points at several levels give real airflow and
-   real authority, and the band is recomputed from observation. Every assumption above then drops
-   out.
+   real authority, the band is recomputed from observation, and a calibrated plant model becomes
+   worth building. Every assumption above then drops out.
+
+   Sweeping a simulator across guessed corners was considered and rejected: it would prove the
+   controller settles in an imaginary flat, which is easy to mistake for validation.
 
 If the restricted corner turns out to be real, four people may keep CO₂ above ~900 ppm even at
 level 80. The unit will sit pinned at the ceiling, and that is correct behaviour — a capacity
@@ -708,12 +713,17 @@ The pure modules are written **test-first** — `freshness`, `precedence`, `poli
 Adapters are tested after, against fakes, because their shape is not knowable until the real
 protocol has been spoken.
 
-**One test is closed-loop.** "It must settle" is a property that unfolds over hours with the
-room's CO₂ dynamics inside the loop, and no amount of per-function assertion demonstrates it.
-`sim/room.ts` is a crude model — occupancy adds ppm per minute, ventilation removes proportional
-to level — driven by simulated time, so twenty-four hours runs in milliseconds. It asserts the
-change count stays low and CO₂ stays within bounds. Everything else in the suite tests a rule;
-this one tests the requirement the rules exist to serve.
+**Some tests are traces.** A hand-written series of `(minute, co2)` pairs plus a clock, fed to the
+real control modules, asserting on the *sequence* of commands rather than on one decision. No
+physics: it says "here is a CO₂ trace, here is what the controller does". That is what catches
+bugs which only exist across time — the cap releasing too early, a square wave, flutter at a step
+boundary — and it is about 30 lines of harness.
+
+**A closed-loop plant model is deliberately deferred**, not omitted. It would answer whether the
+loop converges, which a scripted trace structurally cannot. But every parameter it needs — airflow
+per level, each room's share, transfer through open doors — is currently a guess, so it would
+prove the controller settles in an imaginary flat. Its precondition is a week of logged settling
+points. Build it then, with the band recomputation it enables. See `docs/test-plan.md`.
 
 `node:test` + `node:assert/strict`. No framework.
 

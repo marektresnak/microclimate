@@ -79,8 +79,11 @@ nothing accumulates. The real constraint underneath it *was* adopted: **dwell ma
 than the slowest CO₂ source's refresh interval**, or the controller acts before it could observe
 the previous change.
 
-**F7 — a closed-loop settle test.** "It must settle" unfolds over hours with the room's CO₂
-dynamics inside the loop, and no per-function assertion demonstrates it. See the section below.
+**F7 — tests that exercise behaviour over time.** "It must settle" unfolds over hours and no
+per-function assertion demonstrates it. Originally specified as a closed-loop simulator; **later
+reduced to scripted traces**, because every plant parameter the simulator needs is a guess, and a
+settling test against a guessed plant proves the controller settles in an imaginary flat. The
+plant model is deferred until there is measured data. See below.
 
 **F8 — the demand curve is a proportional band sized to the unit's CO₂ authority.** A literature
 review found this is ASHRAE Guideline 36's P-only DCV sequence, so the design is standard rather
@@ -169,8 +172,9 @@ gap.
 
 Put these first in their files. If a reviewer reads nothing else, these are the argument.
 
-1. **Twenty-four simulated hours, and the unit settles.** The closed-loop test below. Every other
-   test asserts a rule; this one asserts the requirement the rules exist to serve.
+1. **Overnight, and the cap holds past 07:00 until the room clears.** A scripted trace, and the
+   regression two independent reviewers found by reasoning. Every other test asserts a rule; this
+   one asserts behaviour over time.
 2. **A stale low reading does not suppress a boost.** A dead sensor sitting at 400 ppm is
    excluded from demand entirely — never averaged in, never read as good air.
 3. **The unit is at 70 when quiet hours begin, and drops at once.** No new target is computed and
@@ -182,52 +186,68 @@ while running high stays high; at 700 while running low stays low. Same number, 
 
 ---
 
-## The closed-loop settle test
+## Scripted trace tests
 
-The one test with time in it. `sim/room.ts` models **each room separately** — its own occupancy
-and its own share of the unit's airflow — and the controller takes the max across them exactly as
-it does in reality. The clock is a counter rather than a wall, so twenty-four simulated hours run
-in milliseconds.
+The tests with time in them. **No physics.** A trace is a hand-written series of `(minute, co2)`
+pairs plus a starting wall-clock time; the harness feeds them to the real control modules, collects
+the commanded levels, and asserts on the *sequence*.
 
-**Per-room is not optional.** With a single well-mixed volume there is only one CO₂ number, so
-bedroom CO₂ and demand CO₂ are necessarily identical — and the sim can then never produce the two
-situations that matter most: *bedroom clear, living room stuffy* (the ordinary daytime case, where
-the output must be free to reach 80), and *people asleep in a stuffy bedroom while the rest of the
-flat is fine* (the case the sleep cap exists for). The sleep logic would ship with no test able to
-tell it working from broken.
+About 30 lines of harness. It makes no claim to model a flat — it says "here is a CO₂ trace, here
+is what the controller does", which is exactly what a sequence bug needs and no more.
 
-**Assert the requirements, not "it settled".** A proportional loop with a decrease limit on a
-first-order plant almost always settles, so that assertion is close to unfalsifiable. Assert
-instead: the output never exceeded `sleepMaxLevel` while sleep was asserted, no adjacent pair of
-commanded levels differs by more than one step, peak CO₂ stayed under a stated ceiling, and the
-change count over 24 hours stayed under a stated bound.
+Assertions are on the sequence, not on individual decisions:
 
-**A run that saturates at the ceiling fails, it does not pass.** In the restricted-airflow and
-high-occupancy corners the loop pins at 80 and CO₂ parks around 1800–2000. "It settled" is
-vacuously true there, so the test would report success on precisely the flats it was added to
-check.
+- output never exceeded `sleepMaxLevel` while sleep was asserted
+- no two consecutive commands differ by more than one step, **except** a sleep-cap enforcement move,
+  which is immediate and unlimited by design
+- fewer than N changes across the trace
+- the level never returns to the floor in a single move
 
-- **Base case.** Two people in the bedroom 23:00–07:00, doors closed. Assert the level changes
-  fewer than N times overnight, never exceeds `sleepMaxLevel`, and CO₂ stays below a stated
-  ceiling.
-- **The square wave F3 fixed.** A CO₂ profile that crosses 800 and, once ventilated, drops below
-  650 inside one dwell. Assert the sequence contains no 20 → 80 → 20 and no single-move return to
-  the floor.
-- **Cooking spike at 19:00.** CO₂ rises fast. Assert the level reaches its demanded value on the
-  *first* cycle — the asymmetry is the whole point, and a symmetric rate limit fails this test.
-- **Evening at 70 into quiet hours.** Assert the drop lands at 22:00, not at the next dwell.
-- **Netatmo's 8-minute refresh.** Feed the same reading repeatedly between vendor updates. Assert
-  the controller neither accumulates nor repeatedly acts on unchanged input.
-- **Sensor dies at 02:00.** Readings stop. Assert the level falls back to the safe default, stays
-  capped, and does not drift.
+### The traces
 
-### The sensitivity sweep
+- **Overnight, clearing late.** CO₂ climbs from 23:00, sits at 1300, starts falling at 07:30. Assert
+  the cap holds past 07:00 while CO₂ is high and releases only as the room clears. This is the
+  regression that two independent reviewers found; it would have failed here immediately.
+- **The square wave.** CO₂ rises past the band, then falls below the release point within one dwell.
+  Assert no 20 → 80 → 20 and no single-move return to the floor.
+- **Cooking spike.** Fast rise at 19:00. Assert the level reaches its demanded value promptly — the
+  asymmetry is the point, and a symmetric rate limit fails this trace.
+- **Evening at 70 into quiet hours.** Level 70 at 21:55, demand flat, clock passes 22:00. Assert the
+  drop lands at the boundary, not at the next dwell.
+- **Netatmo's refresh.** The same reading repeated for 8 simulated minutes between changes. Assert
+  the controller neither accumulates nor re-acts on unchanged input.
+- **Sensor dies at 02:00.** Readings stop. Assert fallback to the safe default, still capped, no
+  drift.
+- **Hovering at a step boundary.** CO₂ oscillating ±20 ppm around a step edge. Assert no flutter —
+  this is what the 60 ppm hysteresis is for.
+- **Threshold boundaries.** CO₂ exactly at `C_LO`, `C_HI`, the sleep threshold, and each step edge.
+- **Restart mid-trace.** Assert the dwell behaviour matches whatever the persistence decision is.
 
-Nobody has measured this flat's response, and the band was sized against an estimate. So the
-settle test runs the **base case across every plausible flat**, not just one:
+### What this deliberately cannot do
 
-| Axis | Range swept |
-|---|---|
+It cannot tell you whether the loop **converges**, because convergence is a property of the closed
+loop and a scripted trace is open — the controller's actions do not feed back into the CO₂ series.
+That question needs a plant model, and a plant model needs plant parameters.
+
+## Later: the plant model, once there is data
+
+Noted here so it is a deferred plan rather than an omission.
+
+A closed-loop simulator — per-room CO₂ mass balance, occupancy, airflow shares, the controller's own
+output feeding back — would answer the convergence question and let thresholds be tuned in
+milliseconds instead of one experiment per night.
+
+**Its precondition is measured data.** Every parameter that matters is currently a guess: airflow at
+each level, each room's share of it, inter-room transfer through open doors. Built now it would prove
+the controller settles in an imaginary flat, which is a weaker claim than it appears and easy to
+mistake for validation.
+
+After a week of operation there are logged settling points at several levels, which pin the airflow
+curve and the flow shares. At that point the model is calibrated against this flat rather than swept
+across plausible ones, and it becomes genuinely predictive. Build it then, together with the band
+recomputation it enables.
+
+---|---|
 | Airflow at level 20 → 80 | 45 → 140 (restricted install) through 70 → 220 m³/h (optimistic) |
 | Occupants, and which room they are in | 2 to 5, distributed |
 | Bedroom's share of total flow | 20–50% |

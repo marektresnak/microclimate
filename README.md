@@ -38,9 +38,13 @@ The control law is ASHRAE Guideline 36's proportional-only demand-controlled-ven
 sequence: CO₂ maps to fan level along a straight line, with hysteresis at each step boundary and
 asymmetric timing — fast to respond, slow to retreat. The one parameter that decides whether it
 settles or oscillates is the width of that line, and it has to be at least as wide as the CO₂
-swing the fan can itself produce. Nobody has measured that for this flat yet, so the width is an
-estimate validated by sweeping the simulator across every plausible version of the flat, and it
-will be recomputed from logged data once there is some.
+swing the fan can itself produce. Nobody has measured that for this flat, so it is an estimate,
+and the README will say so until there is a week of data to recompute it from.
+
+Behaviour over time is tested with **scripted CO₂ traces** — a hand-written series of readings fed
+to the real control modules, asserting on the sequence of commands. A closed-loop plant model
+would answer more, but every parameter it needs is currently a guess, so it is deferred until the
+plant can be characterised rather than assumed.
 
 The interesting properties are the safety ones: a sensor that goes silent must never read as
 "air is fine", and a dead sensor at 3am must never let the unit run loud.
