@@ -12,3 +12,6 @@ data/
 !.env.example
 
 .DS_Store
+
+# AI-review scaffolding — never shipped
+.review/

@@ -38,14 +38,51 @@ responds at once rather than waiting out a dwell period.
 
 ### Still open — ingest only, deferred with that module
 
-**Q5 — How old is "too old" on ingest?** Timestamp validation must reject a node that has not
-synced NTP, but a node replaying a buffered backlog legitimately sends hours-old readings. These
-pull in opposite directions. *Recommendation: reject `measured_at` more than 7 days old or more
-than 5 minutes in the future.*
-
 **Q6 — Is a bad reading in a batch fatal to the whole batch?**
 *Recommendation: no. Store the valid readings, report the rejected ones with reasons. One
 misconfigured measurement should not discard eight good ones.*
+
+### From the independent review
+
+Two agents reviewed the design before any code existed: one given only the requirements and asked
+to name the hard problems, one given the decisions with all reasoning stripped and told at least
+three were wrong. Findings acted on, F1–F6:
+
+**F1 — CO₂-based sleep inference is DELETED.** It was fatal, not imperfect. Bedroom CO₂ was both
+the demand signal and the occupancy signal, so every reading high enough to create demand
+(>800 ppm) had already asserted sleep (>700) and capped the response at 50. Levels 60–80 were
+unreachable, and the state self-sustained because capped airflow clears CO₂ slowly. Sleep is now
+quiet hours only. No threshold arrangement could have fixed a signal used to raise demand and
+clamp the response at once.
+
+**F3 — asymmetric rate limiting ADDED.** The design had none: demand crossing 800 slammed 20 → 80,
+the unit pulled CO₂ under 650 within one dwell, and it slammed back — a square wave with a
+~20-minute period, exactly what the project exists to prevent. Increases now apply immediately and
+at full distance; decreases move one step per dwell. *This gap came from confusing two opposite
+rules when Q2 was decided: "must differ by more than one step" (a dead zone, rightly removed) and
+"may move at most one step" (rate limiting, which was never there).*
+
+**F4 — the sleep cap applies to the current level**, not only to newly computed targets, and
+bypasses dwell. Previously a unit left at 70 by evening cooking ran all night whenever demand sat
+mid-range and produced no new target.
+
+**F5 — the last change is persisted.** Without it every restart reset the dwell, so a crash loop
+made one change per restart instead of one per ten minutes.
+
+**F6 — ingest rejects future timestamps only.** A past-side window would discard the buffered
+backlog that batching exists to carry, and buys nothing because `INSERT OR IGNORE` already makes
+replay idempotent at any age.
+
+**Considered and not acted on.** One reviewer argued that repeated identical Netatmo readings
+would wind the controller up — "fresh is not novel". The mechanism assumes an integrating
+controller; ours is stateless and proportional, so the same input yields the same target and
+nothing accumulates. The real constraint underneath it *was* adopted: **dwell may never be shorter
+than the slowest CO₂ source's refresh interval**, or the controller acts before it could observe
+the previous change.
+
+**Decided against the reviewers.** Both flagged that the service overwrites a hand-set level
+within 30 seconds, and recommended honouring manual changes. Rejected knowingly — see the actuator
+section for the reasoning and the residual risk.
 
 ---
 
@@ -74,13 +111,41 @@ misconfigured measurement should not discard eight good ones.*
 
 Put these first in their files. If a reviewer reads nothing else, these are the argument.
 
-1. **A stale low reading does not suppress a boost.** A dead sensor sitting at 400 ppm is
+1. **Twenty-four simulated hours, and the unit settles.** The closed-loop test below. Every other
+   test asserts a rule; this one asserts the requirement the rules exist to serve.
+2. **A stale low reading does not suppress a boost.** A dead sensor sitting at 400 ppm is
    excluded from demand entirely — never averaged in, never read as good air.
-2. **Hysteresis, both directions from one input.** CO₂ at 700 while running high stays high; CO₂
-   at 700 while running low stays low. Same number, opposite outcome — that pair is the proof
-   the oscillation problem is solved.
-3. **Night, bedroom sensor dead, unit stays quiet.** The guard that stops a failed Netatmo
-   running the unit at full commanded power at 3am.
+3. **The unit is at 70 when quiet hours begin, and drops at once.** No new target is computed and
+   demand has not moved, yet the level still falls to 50 — because the cap is evaluated against
+   where the unit *is*, not only against a freshly computed target.
+
+Close behind, worth reading second: **hysteresis, both directions from one input** — CO₂ at 700
+while running high stays high; at 700 while running low stays low. Same number, opposite outcome.
+
+---
+
+## The closed-loop settle test
+
+The one test with time in it. `sim/room.ts` is a crude model — occupancy adds a fixed ppm per
+minute, ventilation removes CO₂ in proportion to the level — and the clock is a counter rather
+than a wall, so twenty-four simulated hours run in milliseconds.
+
+- **Base case.** Two people in the bedroom 23:00–07:00, doors closed. Assert the level changes
+  fewer than N times overnight, never exceeds `sleepMaxLevel`, and CO₂ stays below a stated
+  ceiling.
+- **The square wave F3 fixed.** A CO₂ profile that crosses 800 and, once ventilated, drops below
+  650 inside one dwell. Assert the sequence contains no 20 → 80 → 20 and no single-move return to
+  the floor.
+- **Cooking spike at 19:00.** CO₂ rises fast. Assert the level reaches its demanded value on the
+  *first* cycle — the asymmetry is the whole point, and a symmetric rate limit fails this test.
+- **Evening at 70 into quiet hours.** Assert the drop lands at 22:00, not at the next dwell.
+- **Netatmo's 8-minute refresh.** Feed the same reading repeatedly between vendor updates. Assert
+  the controller neither accumulates nor repeatedly acts on unchanged input.
+- **Sensor dies at 02:00.** Readings stop. Assert the level falls back to the safe default, stays
+  capped, and does not drift.
+
+This is where the requirements are actually tested. If one of these fails, the per-function tests
+passing is not reassuring.
 
 ---
 
@@ -139,37 +204,66 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
 
 ### Sleep
 
-- bedroom CO₂ fresh and above the sleep threshold → sleeping
-- bedroom CO₂ fresh and below it, in daytime → not sleeping
-- inside quiet hours → sleeping regardless of CO₂
+Quiet hours only. **CO₂ never asserts sleep** — see F1.
+
+- inside quiet hours → sleeping, whatever CO₂ says
+- outside quiet hours → not sleeping, whatever CO₂ says
 - **quiet hours wrap midnight** — 23:30 sleeping, 02:00 sleeping, 12:00 not. 22:00–07:00 is
   `hour >= 22 || hour < 7`; written with `&&` it is *always false* and the night cap silently
   never fires. Most likely bug in the project.
 - quiet-hours boundaries exactly at 22:00 and 07:00 → pinned
-- **bedroom CO₂ stale outside quiet hours → NOT sleeping.** Only a *fresh* reading can assert
-  sleep. A dead Netatmo must not cap ventilation all day (Q1).
-- **bedroom CO₂ stale inside quiet hours → sleeping anyway** — via quiet hours, not inference.
-  This is headline case 3, and after Q1 it is the *only* thing standing between a dead sensor and
-  a loud unit at 3am, so it matters more than it did when there were two clauses.
+- **F1 regression guard: bedroom CO₂ at 1100 ppm outside quiet hours → NOT sleeping, and the
+  level is free to exceed 50.** This is the case that was structurally impossible before — high
+  CO₂ asserted sleep, which capped the response to the CO₂. Levels 60–80 must be reachable on
+  demand alone.
+- **every sensor dead, inside quiet hours → still sleeping.** Quiet hours depends on no sensor,
+  and is now the only thing between a dead Netatmo and a loud unit at 3am.
 - sleeping caps the level to `sleepMaxLevel`
-- sleeping with demand at the ceiling → capped to 50, and the reasons record **both** the demand and the
-  cap, not just the outcome
+- sleeping with demand at the ceiling → capped to 50, and the reasons record **both** the demand
+  and the cap, not just the outcome
 
 ## `limiter.ts`
 
-`(desired, current, lastChangeAt, now) -> ControlOutcome`
+`(desired, current, sleeping, lastChangeAt, now) -> ControlOutcome`
+
+**Rate limiting — asymmetric (F3)**
+
+- **an increase applies immediately and at full distance** — 20 → 80 in one move, no dwell wait
+- **a decrease moves one step only** — desired 20 from current 80 yields 70, not 20
+- a decrease is subject to dwell; the next step waits `minDwellMinutes`
+- **descending 80 → 20 takes six changes and sixty minutes**, one step each
+- an increase *during* a descent applies at once and is not held by the descent's dwell
+- **F3 regression guard: demand crossing 800 must not produce 20 → 80 → 20.** Given a CO₂ series
+  that rises past 800 and falls below 650 within one dwell, the level must not return to 20 in a
+  single move.
+
+**Dwell**
 
 - desired equals current → `unchanged`, and **no write is issued**
-- desired differs, dwell elapsed → `changed`
 - desired differs, dwell not elapsed → `unchanged`, reason names dwell
 - dwell boundary exactly → pinned
-- **no previous change → acts immediately** (Q4), not held for a dwell period
-- a single-step change is allowed — 70 → 80 and 20 → 30 must both be reachable (Q2 regression
-  guard; the removed step-size deadband made exactly these impossible)
 - **dwell is measured from the last actual change, not the last evaluation** — evaluating every
   30 s must not keep resetting the timer, or nothing ever moves
+- **no previous change at all → acts immediately** (Q4)
+- **F5: a restart does not reset dwell.** Given `last_change_at` persisted two minutes ago, a
+  freshly started limiter waits the remaining eight — it must not treat a restart as "no previous
+  change". Guards the crash-loop case where every restart drives a change.
 - a suppressed change is reported in the outcome, never silently dropped
-- **the hysteresis pair** (headline case 2)
+
+**The sleep cap**
+
+- **F4: the cap applies to the current level, not only to a computed target.** Unit at 70, quiet
+  hours begin, demand unchanged at mid-range so no new target is produced → the level must still
+  drop to 50.
+- **the cap bypasses dwell** — a drop at the boundary is immediate even if the last change was
+  one minute ago
+- **the cap is not rate-limited** — 80 → 50 happens in one move, not one step per dwell
+- leaving quiet hours does not force a change; the level rises only as demand warrants
+
+**Levels**
+
+- a single-step change is allowed — 70 → 80 and 20 → 30 must both be reachable (Q2 regression
+  guard)
 - values from outside (config, Modbus read) narrow to a valid `Level` or are rejected
 - **the commanded ceiling holds** — a demand that would exceed 80 clamps to 80
 - **a wall-panel level above the ceiling is readable and handled** — the unit reports 100, which
@@ -182,9 +276,10 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
 - **the identical batch replayed → row count unchanged**
 - partial replay — some seen, some new → only the new ones stored
 - a retried reading keeps its **original** `received_at`, not the retry's
-- `measured_at` far in the future → rejected
-- `measured_at` far in the past → rejected (**Q5** — must still accept a legitimate buffered
-  backlog)
+- `measured_at` more than five minutes in the future → rejected
+- **`measured_at` arbitrarily far in the past → ACCEPTED** (F6). A twelve-hour backlog must land
+  intact; `INSERT OR IGNORE` already makes replay idempotent at any age, so a past-side window
+  would discard real data for no benefit.
 - a buffered backlog replay is stored with original `measured_at` and *now* as `received_at`
 - one invalid reading in a batch → **Q6**
 - unknown `source_id` (not in config) → rejected

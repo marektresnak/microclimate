@@ -130,7 +130,19 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   unit. The device would accept 90 and 100. **We never send them.**
 - There is a wall panel. Someone may change the level by hand. **We reassert our decision on the
   next cycle** — we do not yield to manual changes. A hand-set 90 or 100 is therefore pulled back
-  under the ceiling within one dwell period, which is intended.
+  under the ceiling, which is intended.
+
+  Decided knowingly. The cost is that a hand-set level is overwritten within 30 seconds, so the
+  panel cannot be used to quieten the unit at night. Sleep detection is quiet-hours-only, which
+  bounds the damage — during 22:00–07:00 the service will never command above `sleepMaxLevel`, so
+  the worst case is 30 being pushed back to 50 rather than to 80. **If 50 proves audible, lower
+  `sleepMaxLevel`; do not add manual-override detection without revisiting this decision
+  deliberately.**
+- **If the service dies, the unit holds its last commanded level indefinitely.** There is no
+  watchdog and we do not set a safe level on shutdown. An unattended restart at 21:00 can leave
+  the unit at 80 all night. Accepted: the failure is rare, the alternative adds a shutdown path
+  that a hard crash or power cut would bypass anyway, and the honest fix is a device-side
+  watchdog we do not have.
 
 **Known protocol details**, recovered from my earlier C# spikes in `~/RiderProjects/RecuControl`
 and `~/RiderProjects/DaphneControl` (both proven against the real unit):
@@ -237,6 +249,20 @@ Never store a value in anything else. Conversion happens in the adapter, at the 
 only CO₂ drives the unit. Collection is the point of the system — do not "optimise" the unused
 kinds away.
 
+**A second, tiny table holds controller state that must survive a restart:**
+
+```sql
+CREATE TABLE control_state (
+  id                 INTEGER PRIMARY KEY CHECK (id = 1),  -- exactly one row
+  last_change_at     INTEGER,                             -- epoch ms, UTC
+  last_commanded     INTEGER
+) STRICT;
+```
+
+One row, enforced by the `CHECK`. Without it a crash loop resets the dwell on every start and
+becomes one change per restart instead of one per ten minutes. This is the only mutable state in
+the system; everything else is append-only.
+
 ## Topology lives in config, not the database
 
 Rooms and sensors are declared in `config.ts` as an `as const` object. There is **no `rooms` or
@@ -296,9 +322,15 @@ Until the rollup exists, **nothing prunes**. There is no code path that deletes 
 and a node that buffered through a network outage replays its backlog with the original
 timestamps intact.
 
-**Validate timestamps.** A node that has not synced NTP will report 1970 or 2106. Reject readings
-whose `measured_at` is implausibly far from now (window in config) — one misconfigured device
-otherwise poisons both the store and every freshness decision that reads from it.
+**Validate timestamps in one direction only: reject the future**, beyond about five minutes of
+clock skew. A node reporting 2106 would otherwise look eternally fresh and poison every decision
+downstream.
+
+**Any past timestamp is accepted.** Rejecting old readings would discard exactly the buffered
+backlog that batching exists to carry: a node offline for twelve hours replays around 1,300
+batches, and any window shorter than the outage throws them all away — data the system exists to
+keep. The past-side check also buys nothing, because `INSERT OR IGNORE` already makes replay
+idempotent at any age.
 
 ## The read API
 
@@ -346,6 +378,9 @@ src/
     http.ts             POST /api/readings — batched, idempotent, timestamp-validated
   store/
     readings.ts         node:sqlite; append-only, no pruning path exists yet
+    control-state.ts    the one mutable row: last change, last commanded
+  sim/
+    room.ts             crude CO₂ model for the closed-loop settle test
   control/
     freshness.ts        PURE. reading + now + per-source window -> RoomSignal
     policy.ts           PURE. snapshot -> desired Level + reasons
@@ -387,18 +422,21 @@ Pipeline, in order:
    trust, and trust is what matters while a choice between *live* instruments exists. Once nothing
    is fresh there is no such choice, only the question of what the best remaining information is —
    and that is the newest reading, not the most trusted dead one.
-2. **Sleep detection.** Asleep if *either*:
-   - inside fixed quiet hours (config, default 22:00–07:00), **or**
-   - bedroom CO₂ is fresh and above the sleep threshold.
+2. **Sleep detection — fixed quiet hours only** (config, default 22:00–07:00).
 
-   Quiet hours is unconditional and depends on no sensor, so a dead Netatmo can never let the unit
-   run loud at 3am. CO₂ inference exists to catch early nights and daytime naps *outside* that
-   window — it extends the cap, it is never what guarantees it.
+   **CO₂ is never used to infer occupancy.** An earlier revision asserted sleep when bedroom CO₂
+   exceeded 700 ppm, and that was a fatal error, not a nicety. Bedroom CO₂ is also the demand
+   signal, so *every* reading high enough to create demand (>800) had already asserted sleep
+   (>700) and capped the response at 50. Levels 60–80 were unreachable, and the state
+   self-sustained: capped airflow clears CO₂ slowly, so the false "asleep" persisted for hours.
+   Saturday afternoon, kids in the bedroom with the door shut at 1100 ppm, and the system
+   throttles *down*.
 
-   A third clause once specified here — "night and bedroom CO₂ not fresh" — was **deleted** (Q1).
-   Its window was the same as quiet hours, which already caps unconditionally, so it could never
-   fire. The residual gap it aimed at is an early bedtime before 22:00 with a dead bedroom sensor;
-   that is narrow enough to accept rather than pay for a second time window.
+   The root fault was structural, not a bad threshold. No arrangement of numbers fixes a signal
+   used simultaneously to raise demand and to clamp the response. Quiet hours depends on no
+   sensor and cannot contradict anything.
+
+   Accepted cost: a nap or an early night before 22:00 gets no cap.
 3. **Demand.** Highest fresh CO₂ across all rooms drives the target — worst room wins. Stale and
    missing readings are excluded from demand entirely, **in both directions**: a stale low reading
    is never treated as good air, and a stale high one never pins the unit at the ceiling
@@ -408,24 +446,46 @@ Pipeline, in order:
    continuous ventilation is the safe answer when blind: quieter than boosting, safer than idling.
 5. **Deadband, on the input only.** The CO₂ thresholds differ going up and coming down — boost
    above 800 ppm, do not come back down until below 650.
-6. **Sleep cap.** If asleep, clamp to `sleepMaxLevel` (config, default 50). Above that the unit is
-   audible in the bedroom.
-7. **Dwell.** Do not change if the last change was less than `minDwellMinutes` ago. Dwell is
+6. **Sleep cap.** If asleep, clamp to `sleepMaxLevel` (config, default 50).
+
+   **The cap is applied to the level the unit is currently at, not only to a newly computed
+   target, and it bypasses dwell.** Otherwise: evening cooking leaves the unit at 70, quiet hours
+   begin, CO₂ sits mid-range so no change is computed — and 70 runs all night. A hard requirement
+   does not wait on a rate limiter, so the drop at the boundary is immediate and in one move.
+7. **Rate limit — asymmetric.**
+   - **Increases apply immediately and may move any distance.** A cooking or party spike gets full
+     airflow at once. Under-ventilating is the failure that matters; over-ventilating only costs
+     noise and heat.
+   - **Decreases move at most one step, and are subject to dwell.** The gradual retreat is what
+     stops CO₂ crashing and rebounding into the next boost.
+   - The sleep cap in step 6 is **not** a decrease for this purpose. It is immediate and unlimited.
+
+   This replaces an earlier revision that had no rate limit at all. With only an input deadband,
+   demand crossing 800 slammed 20 → 80, the unit pulled CO₂ under 650 inside one dwell, and it
+   slammed back to 20 — a square wave with roughly a twenty-minute period, which is precisely the
+   behaviour this project exists to eliminate.
+
+   The confusion that produced that gap is worth recording, because the two rules sound alike and
+   are opposites: *"must differ by more than one step to change at all"* creates a dead zone and
+   was rightly removed (Q2); *"may move at most one step per change"* is rate limiting and is what
+   was actually needed. Removing the first was mistaken for having the second.
+8. **Dwell.** Do not change if the last change was less than `minDwellMinutes` ago. Dwell is
    measured from the last actual **change**, never from the last evaluation — otherwise evaluating
-   every 30 s resets the timer forever and nothing ever moves. **On the first cycle after startup
-   there is no previous change and the limiter acts immediately** (Q4): the unit's current level is
-   read at startup, so that decision is as informed as any later one, and a restart during bad air
-   responds at once.
-8. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80).
+   every 30 s resets the timer forever and nothing ever moves.
 
-**On steps 5 and 7 together:** the requirement is that the unit settles on a stable level rather
-than oscillating 80 → 20 → 80. Dwell alone only limits how *often* it swings; the input deadband
-is what stops the swing happening. Both are needed.
+   **The last change is persisted** (`control_state`), so a restart does not reset it. A genuinely
+   first run acts immediately; a restart two minutes after a change waits out the remaining eight.
+   Without persistence a crash loop becomes one change per restart rather than one per ten minutes.
 
-An earlier revision also required the target to differ from the current level by more than one
-step. That was **removed** (Q2): it created a dead zone where 20 → 40 was possible but 20 → 30
-never was, and the top of the range could never be reached at all. Dwell already prevents
-twitchiness, so the step-size rule bought nothing and cost reachability.
+   **Dwell must be at least as long as the slowest CO₂ source's refresh interval.** Netatmo
+   updates every 7–8 minutes, so a shorter dwell would act again before the effect of the last
+   change could possibly be observed. Ten minutes satisfies this; it is a constraint, not a
+   coincidence, and it moves if the sensor fleet does.
+9. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80).
+
+**On steps 5, 7 and 8 together:** settling needs all three. The input deadband stops boundary
+chatter, the asymmetric rate limit stops the swing, and dwell stops the twitch. Any one alone
+leaves a version of the oscillation intact.
 
 **Every decision carries its reasoning.** `ControlOutcome` includes the reasons that produced it,
 and those surface in `/api/state` and the logs. A decision you cannot explain after the fact is a
@@ -455,12 +515,23 @@ things that do not.
 ## Testing
 
 **Full case list: [`docs/test-plan.md`](docs/test-plan.md).** Written before the implementation,
-Q1–Q4 are decided and folded into the control logic above. Q5 and Q6 concern only the ingest
-endpoint and are deferred with it.
+Q1–Q4 are decided and folded into the control logic above. Q6 concerns only the ingest endpoint
+and is deferred with it.
+
+The plan also records **F1–F6**, the findings from an independent review run before any code
+existed — two agents, one given only the requirements, one given the decisions with all reasoning
+stripped. Three of the six changed the control logic materially, and one of those was fatal.
 
 The pure modules are written **test-first** — `freshness`, `precedence`, `policy`, `limiter`.
 Adapters are tested after, against fakes, because their shape is not knowable until the real
 protocol has been spoken.
+
+**One test is closed-loop.** "It must settle" is a property that unfolds over hours with the
+room's CO₂ dynamics inside the loop, and no amount of per-function assertion demonstrates it.
+`sim/room.ts` is a crude model — occupancy adds ppm per minute, ventilation removes proportional
+to level — driven by simulated time, so twenty-four hours runs in milliseconds. It asserts the
+change count stays low and CO₂ stays within bounds. Everything else in the suite tests a rule;
+this one tests the requirement the rules exist to serve.
 
 `node:test` + `node:assert/strict`. No framework.
 
@@ -494,11 +565,10 @@ Starting defaults, all to be tuned against reality:
 | CO₂ boost threshold (rising) | 800 ppm | tune |
 | CO₂ release threshold (falling) | 650 ppm | tune |
 | CO₂ maximum demand | 1200 ppm | tune |
-| Bedroom sleep CO₂ threshold | 700 ppm | tune |
 | Quiet hours | 22:00–07:00 | tune |
 | Sleep max level | 50 | tune |
 | Safe default level (no data) | 40 | tune |
-| Minimum dwell | 10 minutes | tune |
+| Minimum dwell | 10 minutes | tune, floor ≥ 8 min |
 | Control evaluation interval | 30 s | tune |
 | `MIN_LEVEL` | 20 | **physical** |
 | `MAX_COMMANDED_LEVEL` | 80 | **physical** |
@@ -506,6 +576,13 @@ Starting defaults, all to be tuned against reality:
 The last two are **not tuning knobs.** 20 is what the unit does; 80 is what the intake grille in
 this flat allows. Everything above is a preference to be adjusted against real readings; these two
 describe the world and should only change if the hardware does.
+
+**Minimum dwell has a floor**, not just a default: it may never be set below the slowest CO₂
+source's refresh interval (8 minutes for Netatmo). Below that the controller acts before it can
+observe the last change.
+
+There is **no bedroom sleep CO₂ threshold** any more. If 50 turns out to be audible in practice,
+lower `sleepMaxLevel` — do not reintroduce CO₂-based occupancy inference.
 
 ---
 
