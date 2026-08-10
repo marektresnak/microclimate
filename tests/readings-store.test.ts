@@ -111,6 +111,25 @@ describe('the readings store', () => {
     store.close();
   });
 
+  it('includes readings sitting exactly on both ends of the range', () => {
+    // Pinned either way, but pinned — the same discipline the freshness window
+    // gets. A dashboard asking for "the last hour" twice in a row must not have
+    // a reading fall down the crack between the two windows.
+    const store = openReadingStore(':memory:');
+    store.insert([
+      reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE),
+      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE),
+    ]);
+
+    const inclusive = store.readingsInRange('bedroom_netatmo', 'co2', NOW - 2 * MINUTE, NOW - MINUTE);
+
+    assert.deepEqual(
+      inclusive.map((stored) => stored.value),
+      [812, 845],
+    );
+    store.close();
+  });
+
   it('reports nothing for a source that has never spoken', () => {
     const store = openReadingStore(':memory:');
 

@@ -78,6 +78,23 @@ describe('precedence', () => {
     });
   });
 
+  it('picks the newest stale reading even when it is the higher-ranked one', () => {
+    // The mirror of the case above, and it is not redundant: there, the newest
+    // reading was also the last one in the list, so "newest" and "whichever we
+    // looked at last" are the same answer. Only this direction can tell them apart.
+    const readings = [
+      reading('kids_room_tado_left', 'temperature', 21.5, 5 * MINUTE),
+      reading('kids_room_tado_right', 'temperature', 23.1, 40 * MINUTE),
+    ];
+
+    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+      status: 'stale',
+      sourceId: 'kids_room_tado_left',
+      value: 21.5,
+      measuredAt: NOW - 5 * MINUTE,
+    });
+  });
+
   it('resolves a room with exactly one source', () => {
     const readings = [reading('living_room_tado', 'temperature', 20.4, 30 * SECOND)];
 

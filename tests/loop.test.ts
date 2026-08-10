@@ -172,7 +172,10 @@ describe('the control loop', () => {
     await loop.tick(MIDDAY);
 
     assert.deepEqual(unit.commands, [CONTROL.safeDefaultLevel]);
-    assert.match(log.lines.join('\n'), /disk is full/);
+    assert.match(log.lines.join('\n'), /could not store 1 readings from netatmo: disk is full/);
+    // The source polled perfectly well. Blaming it sends whoever is reading this
+    // at 3am to the vendor's status page instead of to the disk.
+    assert.doesNotMatch(log.lines.join('\n'), /did not report/);
   });
 
   it('retries a level the unit refused rather than recording it as achieved', async () => {
@@ -250,8 +253,29 @@ describe('the control loop', () => {
     unit.level = 80;
     await loop.tick(NIGHT + 30_000);
 
-    assert.match(log.lines.join('\n'), /the unit is at 80% and we last commanded 20%/);
+    assert.match(log.lines.join('\n'), /the unit reports 80% and we are holding 20%/);
     assert.deepEqual(unit.commands, []);
+    store.close();
+  });
+
+  it('does not claim to have commanded a level it only assumed', async () => {
+    // The read fails at startup, so the level is adopted from the safe default —
+    // nothing was ever sent. When the unit becomes readable and disagrees, the
+    // report must not invent a command, and must not accuse the wall panel of a
+    // mismatch that a transient read failure manufactured.
+    const store = openReadingStore(':memory:');
+    const unit = createFakeUnit(60);
+    const log = recorder();
+    const loop = createControlLoop({ sources: [], store, unit, log: log.log });
+
+    unit.failReads = true;
+    await loop.tick(MIDDAY);
+    unit.failReads = false;
+    await loop.tick(MIDDAY + 30_000);
+
+    assert.deepEqual(unit.commands, []);
+    assert.match(log.lines.join('\n'), /the unit reports 60% and we are holding 40%/);
+    assert.doesNotMatch(log.lines.join('\n'), /commanded/);
     store.close();
   });
 
@@ -344,6 +368,28 @@ describe('the control loop', () => {
 
     for (let minute = 0; minute <= 30; minute += 1) {
       await loop.tick(MIDDAY + minute * MINUTE);
+    }
+
+    assert.equal(capacityReports(log), 0);
+    store.close();
+  });
+
+  it('does not cry capacity while the sleep cap is what is holding the fan down', async () => {
+    // 1400 ppm all night, but the unit is at 50 because someone is asleep. The
+    // fan is not out of capacity; it is under orders. Without the ceiling half
+    // of the condition this fires every ten minutes, every night.
+    const store = openReadingStore(':memory:');
+    const live = liveCo2Source('netatmo', 1400);
+    const log = recorder();
+    const loop = createControlLoop({
+      sources: [live.source],
+      store,
+      unit: createFakeUnit(20),
+      log: log.log,
+    });
+
+    for (let minute = 0; minute <= 30; minute += 0.5) {
+      await loop.tick(NIGHT + minute * MINUTE);
     }
 
     assert.equal(capacityReports(log), 0);

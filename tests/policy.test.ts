@@ -231,6 +231,18 @@ describe('hysteresis', () => {
 
     assert.match(decide(snapshot, WINTER_MIDDAY).reasons.join(' '), /hysteresis/);
   });
+
+  it('does not claim to be holding a level on a decision that moves', () => {
+    // The bias changes the target on far more ticks than it produces a
+    // standstill, and a reason that says "holding 70%" next to the limiter's
+    // "raising 20% to 70%" makes the log actively misleading about what happened.
+    const moving = snapshotOf({ bedroom: fresh('bedroom_netatmo', 1245), currentLevel: 20 });
+
+    const decision = decide(moving, WINTER_MIDDAY);
+
+    assert.notEqual(decision.desiredLevel, 20);
+    assert.doesNotMatch(decision.reasons.join(' '), /holding/);
+  });
 });
 
 describe('sleep', () => {

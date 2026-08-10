@@ -160,6 +160,16 @@ describe('evening at 70 into quiet hours', () => {
   it('does not move again for the rest of the evening', () => {
     assert.deepEqual(commandedLevels(steps), [50]);
   });
+
+  it('is the trace that makes the descent rule exempt the cap', () => {
+    // 70 -> 50 is two steps in one move, which the descent rule forbids and the
+    // sleep cap requires. This is the only trace that performs a cap move, so
+    // without it here the exemption in the helper is never taken and could be
+    // deleted with the suite still green — an exemption nothing exercises is
+    // indistinguishable from a mistake.
+    assertStepwiseDescent(steps);
+    assertCapRespected(steps);
+  });
 });
 
 describe("Netatmo's refresh", () => {

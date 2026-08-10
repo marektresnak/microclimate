@@ -50,10 +50,25 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
 
       // Per source: one vendor being unreachable must not stop the others being
       // read, or a decision being made from whatever did arrive.
+      //
+      // The poll and the write are caught separately because they fail for
+      // unrelated reasons and an operator chases the one the log names. A full
+      // disk reported as "the Netatmo did not report" sends them to the vendor's
+      // status page at 3am.
+      let readings: readonly Reading[];
       try {
-        dependencies.store.insert(await source.poll(now));
+        readings = await source.poll(now);
       } catch (error) {
         dependencies.log(`${source.name} did not report: ${messageOf(error)}`);
+        continue;
+      }
+
+      try {
+        dependencies.store.insert(readings);
+      } catch (error) {
+        dependencies.log(
+          `could not store ${readings.length} readings from ${source.name}: ${messageOf(error)}`,
+        );
       }
     }
 
@@ -65,9 +80,17 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
       // is the highest level we are allowed to hold it at.
       currentLevel = actualLevel === undefined ? CONTROL.safeDefaultLevel : underTheCeiling(actualLevel);
     } else if (actualLevel !== undefined && actualLevel !== currentLevel) {
-      // Reported, not acted on. Somebody used the wall panel; we keep deciding
-      // from our own last commanded value, and the next change overwrites theirs.
-      dependencies.log(`the unit is at ${actualLevel}% and we last commanded ${currentLevel}% — wall panel?`);
+      // Reported, not acted on. We keep deciding from our own level, and the next
+      // change we make for our own reasons overwrites whatever is there.
+      //
+      // "Holding", not "commanded": after a failed read at startup the level is
+      // an assumption we adopted rather than anything we ever sent, and a line
+      // that accuses the wall panel of a mismatch we invented is worse than no
+      // line at all.
+      dependencies.log(
+        `the unit reports ${actualLevel}% and we are holding ${currentLevel}% — ` +
+          `the wall panel, or a write that did not land`,
+      );
     }
 
     const snapshot: Snapshot = {
