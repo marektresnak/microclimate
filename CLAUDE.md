@@ -122,10 +122,15 @@ window cannot judge both. This is a load-bearing design constraint, not a detail
 
 A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
 
-- Power is a discrete level: **20, 30, 40, … 100 percent**. Nine valid levels. 20 is the minimum;
-  the unit is never turned off.
+- Power is a discrete level: **20, 30, 40, … 100 percent**, in steps of 10.
+- **20 is the floor** — a device limit. The unit is never turned off.
+- **80 is the ceiling** — an *installation* limit, not a device one. The intake grille in this
+  flat cannot pass enough air above roughly 80%, so running higher makes the fan work against a
+  restriction: noisy, inefficient, and it unbalances supply against extract on a heat-recovery
+  unit. The device would accept 90 and 100. **We never send them.**
 - There is a wall panel. Someone may change the level by hand. **We reassert our decision on the
-  next cycle** — we do not yield to manual changes.
+  next cycle** — we do not yield to manual changes. A hand-set 90 or 100 is therefore pulled back
+  under the ceiling within one dwell period, which is intended.
 
 **Known protocol details**, recovered from my earlier C# spikes in `~/RiderProjects/RecuControl`
 and `~/RiderProjects/DaphneControl` (both proven against the real unit):
@@ -147,14 +152,23 @@ not a bug and must not be "corrected". Put this in a comment at the call site.
 Because FC3 reads back successfully, **the current level is observable**. `/api/state` reports
 desired and actual separately, and a mismatch means someone used the wall panel.
 
-Modelled as:
+Because the readable range and the commandable range genuinely differ, they are two types:
 
 ```ts
+// What the unit can report. A wall-panel user can put it at 90 or 100.
 export type Level = 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100;
+
+// What we are ever allowed to send. See the intake-grille limit above.
+export type CommandedLevel = 20 | 30 | 40 | 50 | 60 | 70 | 80;
 ```
 
-A literal union, so an invalid level cannot be constructed. Anything arriving from outside
-(config, Modbus read) goes through a narrowing function.
+`CommandedLevel` is assignable to `Level` with no conversion, so `VentilationUnit.read()` returns
+`Level` and `set()` accepts only `CommandedLevel`. **Commanding 90 is then a compile error, not a
+runtime check that someone has to remember to write.** The ceiling is also a named constant,
+`MAX_COMMANDED_LEVEL`, for the places that need it as a value rather than a type.
+
+Both are plain literal unions — anything arriving from outside (config, a Modbus read) goes
+through a narrowing function.
 
 ---
 
@@ -387,7 +401,9 @@ Pipeline, in order:
    that is narrow enough to accept rather than pay for a second time window.
 3. **Demand.** Highest fresh CO₂ across all rooms drives the target — worst room wins. Stale and
    missing readings are excluded from demand entirely, **in both directions**: a stale low reading
-   is never treated as good air, and a stale high one never pins the unit at 100 indefinitely.
+   is never treated as good air, and a stale high one never pins the unit at the ceiling
+   indefinitely. The CO₂ curve maps onto `20 … MAX_COMMANDED_LEVEL`, so maximum demand is **80**,
+   not 100.
 4. **No fresh CO₂ anywhere** → fall back to `safeDefaultLevel` (config, default 40). Moderate
    continuous ventilation is the safe answer when blind: quieter than boosting, safer than idling.
 5. **Deadband, on the input only.** The CO₂ thresholds differ going up and coming down — boost
@@ -400,16 +416,16 @@ Pipeline, in order:
    there is no previous change and the limiter acts immediately** (Q4): the unit's current level is
    read at startup, so that decision is as informed as any later one, and a restart during bad air
    responds at once.
-8. **Clamp** to a valid `Level`.
+8. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80).
 
 **On steps 5 and 7 together:** the requirement is that the unit settles on a stable level rather
-than oscillating 100 → 20 → 100. Dwell alone only limits how *often* it swings; the input deadband
+than oscillating 80 → 20 → 80. Dwell alone only limits how *often* it swings; the input deadband
 is what stops the swing happening. Both are needed.
 
 An earlier revision also required the target to differ from the current level by more than one
 step. That was **removed** (Q2): it created a dead zone where 20 → 40 was possible but 20 → 30
-never was, and the final 90 → 100 could never happen at all. Dwell already prevents twitchiness,
-so the step-size rule bought nothing and cost reachability.
+never was, and the top of the range could never be reached at all. Dwell already prevents
+twitchiness, so the step-size rule bought nothing and cost reachability.
 
 **Every decision carries its reasoning.** `ControlOutcome` includes the reasons that produced it,
 and those surface in `/api/state` and the logs. A decision you cannot explain after the fact is a
@@ -473,17 +489,23 @@ variables and are never committed.
 
 Starting defaults, all to be tuned against reality:
 
-| Setting | Default |
-|---|---|
-| CO₂ boost threshold (rising) | 800 ppm |
-| CO₂ release threshold (falling) | 650 ppm |
-| CO₂ maximum demand | 1200 ppm |
-| Bedroom sleep CO₂ threshold | 700 ppm |
-| Quiet hours | 22:00–07:00 |
-| Sleep max level | 50 |
-| Safe default level (no data) | 40 |
-| Minimum dwell | 10 minutes |
-| Control evaluation interval | 30 s |
+| Setting | Default | |
+|---|---|---|
+| CO₂ boost threshold (rising) | 800 ppm | tune |
+| CO₂ release threshold (falling) | 650 ppm | tune |
+| CO₂ maximum demand | 1200 ppm | tune |
+| Bedroom sleep CO₂ threshold | 700 ppm | tune |
+| Quiet hours | 22:00–07:00 | tune |
+| Sleep max level | 50 | tune |
+| Safe default level (no data) | 40 | tune |
+| Minimum dwell | 10 minutes | tune |
+| Control evaluation interval | 30 s | tune |
+| `MIN_LEVEL` | 20 | **physical** |
+| `MAX_COMMANDED_LEVEL` | 80 | **physical** |
+
+The last two are **not tuning knobs.** 20 is what the unit does; 80 is what the intake grille in
+this flat allows. Everything above is a preference to be adjusted against real readings; these two
+describe the world and should only change if the hardware does.
 
 ---
 

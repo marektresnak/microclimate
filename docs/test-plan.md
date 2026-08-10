@@ -24,8 +24,8 @@ residual gap — an early bedtime before 22:00 with a dead bedroom sensor — is
 paying for a second time window.
 
 **Q2 — The step-size deadband is DROPPED.** Requiring the target to differ by more than one step
-created a dead zone: 20 → 40 possible, 20 → 30 never, and 90 → 100 unreachable. The deadband
-lives on the CO₂ input only (rising 800 / falling 650); dwell handles twitchiness.
+created a dead zone: 20 → 40 possible, 20 → 30 never, and the top of the range unreachable. The
+deadband lives on the CO₂ input only (rising 800 / falling 650); dwell handles twitchiness.
 
 **Q3 — When every source is stale, report the MOST RECENTLY MEASURED one.** Precedence encodes
 trust, which matters while a choice between live instruments exists. Once nothing is fresh there
@@ -80,7 +80,7 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
    at 700 while running low stays low. Same number, opposite outcome — that pair is the proof
    the oscillation problem is solved.
 3. **Night, bedroom sensor dead, unit stays quiet.** The guard that stops a failed Netatmo
-   running the unit at 100% at 3am.
+   running the unit at full commanded power at 3am.
 
 ---
 
@@ -130,11 +130,11 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
 - **a stale LOW reading is excluded** — bedroom stale at 400, kids fresh at 1100 → boost. The
   stale value must not average the demand down.
 - **a stale HIGH reading is also excluded** — a dead sensor last seen at 1400 must not pin the
-  unit at 100 indefinitely. Symmetry matters; this is the failure that wastes power and noise
-  rather than air quality, and it is easy to forget.
+  unit at the ceiling indefinitely. Symmetry matters; this is the failure that wastes power and
+  noise rather than air quality, and it is easy to forget.
 - a `missing` room contributes nothing and does not block the others
 - CO₂ exactly at the boost threshold → pin the inclusive/exclusive choice
-- CO₂ at or above maximum demand → 100
+- CO₂ at or above maximum demand → **80**, the commanded ceiling, never 90 or 100
 - **monotonic**: higher CO₂ never produces a lower level (property-style, table-driven)
 
 ### Sleep
@@ -152,7 +152,7 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
   This is headline case 3, and after Q1 it is the *only* thing standing between a dead sensor and
   a loud unit at 3am, so it matters more than it did when there were two clauses.
 - sleeping caps the level to `sleepMaxLevel`
-- sleeping with demand of 100 → capped to 50, and the reasons record **both** the demand and the
+- sleeping with demand at the ceiling → capped to 50, and the reasons record **both** the demand and the
   cap, not just the outcome
 
 ## `limiter.ts`
@@ -164,13 +164,17 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
 - desired differs, dwell not elapsed → `unchanged`, reason names dwell
 - dwell boundary exactly → pinned
 - **no previous change → acts immediately** (Q4), not held for a dwell period
-- a single-step change is allowed — 90 → 100 and 20 → 30 must both be reachable (Q2 regression
+- a single-step change is allowed — 70 → 80 and 20 → 30 must both be reachable (Q2 regression
   guard; the removed step-size deadband made exactly these impossible)
 - **dwell is measured from the last actual change, not the last evaluation** — evaluating every
   30 s must not keep resetting the timer, or nothing ever moves
 - a suppressed change is reported in the outcome, never silently dropped
 - **the hysteresis pair** (headline case 2)
 - values from outside (config, Modbus read) narrow to a valid `Level` or are rejected
+- **the commanded ceiling holds** — a demand that would exceed 80 clamps to 80
+- **a wall-panel level above the ceiling is readable and handled** — the unit reports 100, which
+  is a valid `Level`; the next decision commands ≤ 80 and pulls it back. Reading 100 must not
+  throw, and commanding 100 must not typecheck.
 
 ## `ingest/http.ts`
 
