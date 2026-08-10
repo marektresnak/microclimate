@@ -1,5 +1,6 @@
 import { CONTROL, ROOM_IDS } from '../config.ts';
 import type { RoomId, SensorId } from '../config.ts';
+import { localHourOfDay } from '../domain/clock.ts';
 import type { Decision, Snapshot } from '../domain/decision.ts';
 import { MAX_COMMANDED_LEVEL, MIN_LEVEL, toCommandedLevel } from '../domain/level.ts';
 import type { CommandedLevel } from '../domain/level.ts';
@@ -107,21 +108,8 @@ function decideSleep(snapshot: Snapshot, now: number, reasons: string[]): boolea
 // 22:00-07:00 wraps midnight, so this is `||`. Written with `&&` it is always
 // false and the night cap silently never fires.
 function inQuietHours(now: number): boolean {
-  const hour = localHour(now);
+  const hour = localHourOfDay(now);
   return hour >= CONTROL.quietHoursStartHour || hour < CONTROL.quietHoursEndHour;
-}
-
-// The zone is explicit so the night cap does not depend on how the host is
-// configured, and so it does not shift by an hour twice a year. Intl handles the
-// DST transitions; a fixed offset would not.
-const hourInConfiguredZone = new Intl.DateTimeFormat('en-GB', {
-  timeZone: CONTROL.timeZone,
-  hour: '2-digit',
-  hourCycle: 'h23',
-});
-
-function localHour(now: number): number {
-  return Number(hourInConfiguredZone.format(new Date(now)));
 }
 
 interface WorstReading {
