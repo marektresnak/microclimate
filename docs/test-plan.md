@@ -13,30 +13,30 @@ read as sentences.
 
 ---
 
-## Open questions this raised
+## Design questions this raised
 
-Unresolved. Each needs a decision before the module it affects is written.
+### Decided
 
-**Q1 — Is the "unknown bedroom CO₂ at night" sleep clause redundant?**
-Sleep is asserted if (a) inside quiet hours, (b) bedroom CO₂ is fresh and above threshold, or
-(c) it is night and bedroom CO₂ is not fresh. If "night" means the same window as quiet hours,
-then (a) already caps unconditionally and **(c) never fires**. Either "night" is a wider window
-than quiet hours, or (c) should be deleted. *Recommendation: delete (c).* Quiet hours already
-guarantees the 3am safety, and (b) exists to catch early nights and daytime naps outside it.
+**Q1 — The "night and bedroom CO₂ not fresh" sleep clause is DELETED.** Its window was the same
+as quiet hours, which already caps unconditionally, so it could never fire. Sleep is now asserted
+on two conditions only: inside quiet hours, or bedroom CO₂ fresh and above threshold. The
+residual gap — an early bedtime before 22:00 with a dead bedroom sensor — is accepted rather than
+paying for a second time window.
 
-**Q2 — Does the step-size deadband stay?** "Target must differ from current by more than one
-step" creates a dead zone: the unit could go 20 → 40 but never 20 → 30, and could never make a
-final 90 → 100. Minimum dwell already prevents twitchiness.
-*Recommendation: drop it. Keep the deadband on the input only (CO₂ rising 800 / falling 650).*
+**Q2 — The step-size deadband is DROPPED.** Requiring the target to differ by more than one step
+created a dead zone: 20 → 40 possible, 20 → 30 never, and 90 → 100 unreachable. The deadband
+lives on the CO₂ input only (rising 800 / falling 650); dwell handles twitchiness.
 
-**Q3 — When every source for a `(room, kind)` is stale, which one is reported?** The
-highest-precedence source, or the most recently measured? They differ, and the answer is visible
-in `/api/state`. *Recommendation: most recently measured — it is the best information available,
-and precedence is about trust, not recency, once nothing is fresh.*
+**Q3 — When every source is stale, report the MOST RECENTLY MEASURED one.** Precedence encodes
+trust, which matters while a choice between live instruments exists. Once nothing is fresh there
+is no such choice — only the question of the best remaining information, which is the newest
+reading rather than the most trusted dead one.
 
-**Q4 — First run has no previous change, so dwell has no baseline.** Act immediately, or wait one
-interval? *Recommendation: act immediately; the unit's current level is read from Modbus at
-startup, so the first decision is as informed as any later one.*
+**Q4 — On the first cycle the limiter ACTS IMMEDIATELY.** The unit's current level is read at
+startup, so the first decision is as informed as any later one, and a restart during bad air
+responds at once rather than waiting out a dwell period.
+
+### Still open — ingest only, deferred with that module
 
 **Q5 — How old is "too old" on ingest?** Timestamp validation must reject a node that has not
 synced NTP, but a node replaying a buffered backlog legitimately sends hours-old readings. These
@@ -106,7 +106,8 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
 
 - highest-precedence source is fresh → it wins, and the result names it
 - highest-precedence is stale, second is fresh → second wins, result names the second
-- every source stale → **Q3**
+- every source stale → returns `stale` carrying the **most recently measured** reading, even when
+  that came from a lower-precedence source (Q3)
 - no source has ever reported → `missing`
 - a source is `isActive: false` → skipped, even if it is the freshest reading present
 - room has exactly one source → that one, trivially
@@ -145,8 +146,11 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
   `hour >= 22 || hour < 7`; written with `&&` it is *always false* and the night cap silently
   never fires. Most likely bug in the project.
 - quiet-hours boundaries exactly at 22:00 and 07:00 → pinned
-- **daytime + bedroom CO₂ stale → NOT sleeping.** If the unknown-data clause is not scoped to
-  night, a dead Netatmo caps ventilation twenty-four hours a day. (See **Q1**.)
+- **bedroom CO₂ stale outside quiet hours → NOT sleeping.** Only a *fresh* reading can assert
+  sleep. A dead Netatmo must not cap ventilation all day (Q1).
+- **bedroom CO₂ stale inside quiet hours → sleeping anyway** — via quiet hours, not inference.
+  This is headline case 3, and after Q1 it is the *only* thing standing between a dead sensor and
+  a loud unit at 3am, so it matters more than it did when there were two clauses.
 - sleeping caps the level to `sleepMaxLevel`
 - sleeping with demand of 100 → capped to 50, and the reasons record **both** the demand and the
   cap, not just the outcome
@@ -159,7 +163,9 @@ Put these first in their files. If a reviewer reads nothing else, these are the 
 - desired differs, dwell elapsed → `changed`
 - desired differs, dwell not elapsed → `unchanged`, reason names dwell
 - dwell boundary exactly → pinned
-- no previous change → **Q4**
+- **no previous change → acts immediately** (Q4), not held for a dwell period
+- a single-step change is allowed — 90 → 100 and 20 → 30 must both be reachable (Q2 regression
+  guard; the removed step-size deadband made exactly these impossible)
 - **dwell is measured from the last actual change, not the last evaluation** — evaluating every
   30 s must not keep resetting the timer, or nothing ever moves
 - a suppressed change is reported in the outcome, never silently dropped

@@ -344,29 +344,48 @@ Pipeline, in order:
    installed it outranks the Netatmo in that room, and the Netatmo is only consulted while the
    SEN66 is stale or absent. Never average two instruments — they have different calibration and
    latency, and a blended number belongs to neither.
-2. **Sleep detection.** Asleep if *any* of:
-   - inside fixed quiet hours (config, default 22:00–07:00), **or**
-   - bedroom CO₂ is fresh and above the sleep threshold, **or**
-   - it is night and bedroom CO₂ is **not** fresh.
 
-   The third clause is the safety one. A dead or stale Netatmo must never let the unit run loud
-   at 3am, so unknown data at night resolves to "asleep". The fixed quiet-hours clause is an
-   independent second guard: sleep detection does not depend on a single sensor being alive.
+   **When every source is stale, report the most recently measured one** (Q3). Precedence encodes
+   trust, and trust is what matters while a choice between *live* instruments exists. Once nothing
+   is fresh there is no such choice, only the question of what the best remaining information is —
+   and that is the newest reading, not the most trusted dead one.
+2. **Sleep detection.** Asleep if *either*:
+   - inside fixed quiet hours (config, default 22:00–07:00), **or**
+   - bedroom CO₂ is fresh and above the sleep threshold.
+
+   Quiet hours is unconditional and depends on no sensor, so a dead Netatmo can never let the unit
+   run loud at 3am. CO₂ inference exists to catch early nights and daytime naps *outside* that
+   window — it extends the cap, it is never what guarantees it.
+
+   A third clause once specified here — "night and bedroom CO₂ not fresh" — was **deleted** (Q1).
+   Its window was the same as quiet hours, which already caps unconditionally, so it could never
+   fire. The residual gap it aimed at is an early bedtime before 22:00 with a dead bedroom sensor;
+   that is narrow enough to accept rather than pay for a second time window.
 3. **Demand.** Highest fresh CO₂ across all rooms drives the target — worst room wins. Stale and
-   missing readings are excluded from demand entirely; they are never treated as low CO₂.
+   missing readings are excluded from demand entirely, **in both directions**: a stale low reading
+   is never treated as good air, and a stale high one never pins the unit at 100 indefinitely.
 4. **No fresh CO₂ anywhere** → fall back to `safeDefaultLevel` (config, default 40). Moderate
    continuous ventilation is the safe answer when blind: quieter than boosting, safer than idling.
-5. **Deadband.** Thresholds differ going up and coming down (e.g. boost above 800ppm, do not come
-   back down until below 650ppm), and the target must differ from the current level by more than
-   one step to trigger a change at all.
+5. **Deadband, on the input only.** The CO₂ thresholds differ going up and coming down — boost
+   above 800 ppm, do not come back down until below 650.
 6. **Sleep cap.** If asleep, clamp to `sleepMaxLevel` (config, default 50). Above that the unit is
    audible in the bedroom.
-7. **Dwell.** Do not change if the last change was less than `minDwellMinutes` ago (config).
+7. **Dwell.** Do not change if the last change was less than `minDwellMinutes` ago. Dwell is
+   measured from the last actual **change**, never from the last evaluation — otherwise evaluating
+   every 30 s resets the timer forever and nothing ever moves. **On the first cycle after startup
+   there is no previous change and the limiter acts immediately** (Q4): the unit's current level is
+   read at startup, so that decision is as informed as any later one, and a restart during bad air
+   responds at once.
 8. **Clamp** to a valid `Level`.
 
-**On steps 5 and 7 together:** the requirement is that the unit settles on a stable power level
-rather than oscillating 100 → 20 → 100. Dwell alone only limits how *often* it swings; the
-deadband is what makes the swing not happen. Both are needed.
+**On steps 5 and 7 together:** the requirement is that the unit settles on a stable level rather
+than oscillating 100 → 20 → 100. Dwell alone only limits how *often* it swings; the input deadband
+is what stops the swing happening. Both are needed.
+
+An earlier revision also required the target to differ from the current level by more than one
+step. That was **removed** (Q2): it created a dead zone where 20 → 40 was possible but 20 → 30
+never was, and the final 90 → 100 could never happen at all. Dwell already prevents twitchiness,
+so the step-size rule bought nothing and cost reachability.
 
 **Every decision carries its reasoning.** `ControlOutcome` includes the reasons that produced it,
 and those surface in `/api/state` and the logs. A decision you cannot explain after the fact is a
@@ -396,8 +415,8 @@ things that do not.
 ## Testing
 
 **Full case list: [`docs/test-plan.md`](docs/test-plan.md).** Written before the implementation,
-and it carries six open design questions (Q1–Q6) that must be answered before the modules they
-affect are written.
+Q1–Q4 are decided and folded into the control logic above. Q5 and Q6 concern only the ingest
+endpoint and are deferred with it.
 
 The pure modules are written **test-first** — `freshness`, `precedence`, `policy`, `limiter`.
 Adapters are tested after, against fakes, because their shape is not knowable until the real
