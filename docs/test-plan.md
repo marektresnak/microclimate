@@ -18,14 +18,13 @@ read as sentences.
 ### Decided
 
 **Q1 — The "night and bedroom CO₂ not fresh" sleep clause is DELETED.** Its window was the same
-as quiet hours, which already caps unconditionally, so it could never fire. Sleep is now asserted
-on two conditions only: inside quiet hours, or bedroom CO₂ fresh and above threshold. The
-residual gap — an early bedtime before 22:00 with a dead bedroom sensor — is accepted rather than
-paying for a second time window.
+as quiet hours, which already caps unconditionally, so it could never fire.
+*Superseded by F1: the remaining CO₂ clause was deleted too, and sleep is now quiet hours alone.*
 
 **Q2 — The step-size deadband is DROPPED.** Requiring the target to differ by more than one step
-created a dead zone: 20 → 40 possible, 20 → 30 never, and the top of the range unreachable. The
-deadband lives on the CO₂ input only (rising 800 / falling 650); dwell handles twitchiness.
+created a dead zone: 20 → 40 possible, 20 → 30 never, and the top of the range unreachable.
+*Superseded by F3 and F8: dropping it left no rate limit at all, and the 800/650 input band it
+pointed at has since been replaced by a proportional band with per-boundary hysteresis.*
 
 **Q3 — When every source is stale, report the MOST RECENTLY MEASURED one.** Precedence encodes
 trust, which matters while a choice between live instruments exists. Once nothing is fresh there
@@ -46,7 +45,7 @@ misconfigured measurement should not discard eight good ones.*
 
 Two agents reviewed the design before any code existed: one given only the requirements and asked
 to name the hard problems, one given the decisions with all reasoning stripped and told at least
-three were wrong. Findings acted on, F1–F6:
+three were wrong. Findings acted on, F1–F6; F7 and F8 came from a follow-up literature review:
 
 **F1 — CO₂-based sleep inference is DELETED.** It was fatal, not imperfect. Bedroom CO₂ was both
 the demand signal and the occupancy signal, so every reading high enough to create demand
@@ -79,6 +78,17 @@ controller; ours is stateless and proportional, so the same input yields the sam
 nothing accumulates. The real constraint underneath it *was* adopted: **dwell may never be shorter
 than the slowest CO₂ source's refresh interval**, or the controller acts before it could observe
 the previous change.
+
+**F7 — a closed-loop settle test.** "It must settle" unfolds over hours with the room's CO₂
+dynamics inside the loop, and no per-function assertion demonstrates it. See the section below.
+
+**F8 — the demand curve is a proportional band sized to the unit's CO₂ authority.** A literature
+review found this is ASHRAE Guideline 36's P-only DCV sequence, so the design is standard rather
+than invented — but it also found the band must be far wider than commercial convention suggests.
+The unit can only hold CO₂ between ~708 ppm (level 80) and ~1358 (level 20) at design occupancy;
+a band narrower than that 650 ppm authority gives loop gain above 1 and hunts regardless of
+hysteresis. Band is now 550 → 1250 ppm, loop gain 0.72, convergence demonstrable on paper. The
+commercial 200 ppm figure would have given loop gain 2.5–19 and an hour-period limit cycle.
 
 **Decided against the reviewers.** Both flagged that the service overwrites a hand-set level
 within 30 seconds, and recommended honouring manual changes. Rejected knowingly — see the actuator
@@ -198,9 +208,14 @@ passing is not reassuring.
   unit at the ceiling indefinitely. Symmetry matters; this is the failure that wastes power and
   noise rather than air quality, and it is easy to forget.
 - a `missing` room contributes nothing and does not block the others
-- CO₂ exactly at the boost threshold → pin the inclusive/exclusive choice
-- CO₂ at or above maximum demand → **80**, the commanded ceiling, never 90 or 100
+- CO₂ at or below `C_LO` (550) → 20; at or above `C_HI` (1250) → **80**, never 90 or 100
+- the band maps linearly in between — table-driven across the seven steps
 - **monotonic**: higher CO₂ never produces a lower level (property-style, table-driven)
+- **hysteresis at a step boundary**: sitting exactly on a boundary and wobbling ±20 ppm produces
+  no change; crossing it by more than 60 ppm does
+- **the loop-gain guard**: with the configured band, a level change must not produce a CO₂ swing
+  larger than the band. Assert `C_HI - C_LO >= fanAuthority` at config load so a future narrowing
+  fails loudly rather than oscillating in the flat.
 
 ### Sleep
 
@@ -258,7 +273,10 @@ Quiet hours only. **CO₂ never asserts sleep** — see F1.
 - **the cap bypasses dwell** — a drop at the boundary is immediate even if the last change was
   one minute ago
 - **the cap is not rate-limited** — 80 → 50 happens in one move, not one step per dwell
-- leaving quiet hours does not force a change; the level rises only as demand warrants
+- **the cap does not update `lastChangeAt`** — otherwise it re-triggers every cycle all night and
+  permanently resets the dwell timer
+- **the cap clamps the output, not the loop's internal level** — after eight capped hours, leaving
+  quiet hours returns the unit to whatever demand actually is, with no jump and no catch-up
 
 **Levels**
 

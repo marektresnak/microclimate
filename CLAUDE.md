@@ -437,21 +437,43 @@ Pipeline, in order:
    sensor and cannot contradict anything.
 
    Accepted cost: a nap or an early night before 22:00 gets no cap.
-3. **Demand.** Highest fresh CO₂ across all rooms drives the target — worst room wins. Stale and
-   missing readings are excluded from demand entirely, **in both directions**: a stale low reading
-   is never treated as good air, and a stale high one never pins the unit at the ceiling
-   indefinitely. The CO₂ curve maps onto `20 … MAX_COMMANDED_LEVEL`, so maximum demand is **80**,
-   not 100.
+3. **Demand — a proportional band.** Highest fresh CO₂ across all rooms drives the target; worst
+   room wins. Stale and missing readings are excluded entirely, **in both directions**: a stale low
+   reading is never treated as good air, and a stale high one never pins the unit at the ceiling.
+
+   ```
+   frac   = clamp((co2 - C_LO) / (C_HI - C_LO), 0, 1)
+   target = quantise(MIN_LEVEL + frac * (MAX_COMMANDED_LEVEL - MIN_LEVEL))
+   ```
+
+   with `C_LO = 550`, `C_HI = 1250`. A straight line from 20% at 550 ppm to 80% at 1250, quantised
+   to the seven legal steps. No integral term, no accumulated state.
 4. **No fresh CO₂ anywhere** → fall back to `safeDefaultLevel` (config, default 40). Moderate
    continuous ventilation is the safe answer when blind: quieter than boosting, safer than idling.
-5. **Deadband, on the input only.** The CO₂ thresholds differ going up and coming down — boost
-   above 800 ppm, do not come back down until below 650.
-6. **Sleep cap.** If asleep, clamp to `sleepMaxLevel` (config, default 50).
+   **Never fall back to the minimum.**
+5. **Hysteresis at each step boundary.** To move up, CO₂ must be `CO2_HYSTERESIS` (60 ppm) past the
+   boundary; to move down, the same below it. Implemented by biasing the reading in the direction
+   of travel and re-quantising, rather than as a separate state machine.
 
-   **The cap is applied to the level the unit is currently at, not only to a newly computed
-   target, and it bypasses dwell.** Otherwise: evening cooking leaves the unit at 70, quiet hours
-   begin, CO₂ sits mid-range so no change is computed — and 70 runs all night. A hard requirement
-   does not wait on a rate limiter, so the drop at the boundary is immediate and in one move.
+   This replaces an earlier "boost above 800, release below 650" band, which was a *binary*
+   trigger dressed as a deadband and contradicted the proportional curve specified two lines
+   above it. One mechanism now, not two.
+6. **Sleep cap — applied *after* the loop, as a clamp on the output.**
+
+   ```
+   out = sleeping ? min(level, sleepMaxLevel) : level
+   ```
+
+   Three properties, all of which matter:
+   - **It clamps the output, not the loop's internal `level`.** The proportional loop keeps
+     tracking real demand all night, so the 07:00 release is a return to what demand already was,
+     not a surprise jump.
+   - **It does not update `lastChangeAt`.** Otherwise the cap re-triggers every cycle through the
+     night and permanently resets the dwell timer.
+   - **It bypasses dwell and is not rate-limited.** A unit at 70 when quiet hours begin drops to
+     50 immediately, in one move. Evening cooking leaving it at 70 must not run all night because
+     demand sat mid-range and produced no new target. A hard requirement does not wait on a rate
+     limiter.
 7. **Rate limit — asymmetric.**
    - **Increases apply immediately and may move any distance.** A cooking or party spike gets full
      airflow at once. Under-ventilating is the failure that matters; over-ventilating only costs
@@ -483,9 +505,61 @@ Pipeline, in order:
    coincidence, and it moves if the sensor fleet does.
 9. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80).
 
-**On steps 5, 7 and 8 together:** settling needs all three. The input deadband stops boundary
-chatter, the asymmetric rate limit stops the swing, and dwell stops the twitch. Any one alone
-leaves a version of the oscillation intact.
+**On steps 3, 5, 7 and 8 together:** settling needs all four. The band's *width* sets the loop
+gain and is what makes convergence provable; hysteresis stops boundary chatter; the asymmetric
+rate limit stops the swing; dwell stops the twitch. The band is doing the real work — the other
+three are polish on top of a loop that is already stable.
+
+## Why this control law, in plain terms
+
+Written out because it has to be explained aloud, and the vocabulary is worse than the idea.
+
+**The proportional band** is a straight line: 20% at 550 ppm, 80% at 1250 ppm, read off the line
+in between. The 700 ppm span is the "band". A wider band means a gentler reaction to the same
+change in CO₂.
+
+**Why the width decides whether it settles.** The fan changes CO₂, the new CO₂ changes the fan,
+round and round. Starting deliberately wrong at level 70, with four people in the flat:
+
+| Fan at | CO₂ settles at | Line says |
+|---|---|---|
+| 70 | 746 | 37 |
+| 37 | 1010 | 58 |
+| 58 | 810 | 42 |
+| 42 | 940 | 53 |
+| 53 | 840 | 45 |
+| 45 | 900 | 50 |
+| 50 | 861 | 47 |
+| | | ≈ **48**, settled |
+
+Each swing is smaller than the last. That ratio — fan movement against CO₂ movement — is the
+**loop gain**, and ours is **0.72**. Below 1 converges; above 1 grows into oscillation.
+
+**How wide is wide enough.** At four occupants this unit can only hold CO₂ somewhere between
+~708 ppm (level 80) and ~1358 ppm (level 20). That 650 ppm span is its entire *authority*. A band
+narrower than the authority means driving the fan end to end moves CO₂ further than the band
+covers — so the fan slams between extremes. Hence the sizing rule:
+
+> **The band must be at least as wide as the CO₂ swing the fan can actually produce.**
+> The controller has to react less strongly than it acts.
+
+This is why the commercial 200 ppm convention does not transfer. An office VAV damper has huge
+airflow authority relative to its zone, so each step barely moves CO₂. A restricted HRV in a
+200 m³ flat moves it a lot: at 200 ppm the loop gain here would be 2.5–19 and it would limit-cycle
+with roughly an hour period.
+
+**Droop is intentional.** The unit settles wherever ventilation balances CO₂ production — inside
+the band, not at a target number. ASHRAE's framing is that CO₂ is a **limit, not a setpoint**:
+maximum ventilation when CO₂ reaches the maximum, proportionally less below. Chasing an exact
+value is what an integral term does, and here it would solve a non-problem while winding itself up
+on Netatmo's repeated readings.
+
+**Provenance.** This is ASHRAE Guideline 36's P-only DCV sequence with Trim-and-Respond-style
+asymmetry, not something invented here. Guideline 36 Addendum q (2024) specifies P-only for CO₂
+and states the reason: CO₂ is a limit to stay under, not a value to oscillate around. Hysteresis
+of 50–100 ppm at switching points is standard practice (Honeywell Jade uses 100). The one place
+this design departs from commercial convention is band width, and that departure is derived above
+rather than chosen.
 
 **Every decision carries its reasoning.** `ControlOutcome` includes the reasons that produced it,
 and those surface in `/api/state` and the logs. A decision you cannot explain after the fact is a
@@ -562,9 +636,9 @@ Starting defaults, all to be tuned against reality:
 
 | Setting | Default | |
 |---|---|---|
-| CO₂ boost threshold (rising) | 800 ppm | tune |
-| CO₂ release threshold (falling) | 650 ppm | tune |
-| CO₂ maximum demand | 1200 ppm | tune |
+| `C_LO` — band bottom, level 20 | 550 ppm | **derived** |
+| `C_HI` — band top, level 80 | 1250 ppm | **derived** |
+| `CO2_HYSTERESIS` | 60 ppm | derived (≈ ½ step) |
 | Quiet hours | 22:00–07:00 | tune |
 | Sleep max level | 50 | tune |
 | Safe default level (no data) | 40 | tune |
@@ -577,9 +651,23 @@ The last two are **not tuning knobs.** 20 is what the unit does; 80 is what the 
 this flat allows. Everything above is a preference to be adjusted against real readings; these two
 describe the world and should only change if the hardware does.
 
+**The band is derived, not tuned.** `C_HI − C_LO` must be at least the CO₂ swing the unit can
+produce between level 20 and level 80 at design occupancy (~650 ppm here), or the loop gain
+exceeds 1 and it hunts no matter how much hysteresis is added. If the band is ever narrowed,
+recompute the gain — do not nudge the numbers. `C_HI = 1250` also matches EN 16798-1 Category II
+(800 ppm above outdoors). `CO2_HYSTERESIS` follows from the band: step width is 700/6 ≈ 117 ppm,
+and half a step is the conventional size.
+
 **Minimum dwell has a floor**, not just a default: it may never be set below the slowest CO₂
 source's refresh interval (8 minutes for Netatmo). Below that the controller acts before it can
 observe the last change.
+
+**Two diagnostics worth having**, both cheap and both standard practice:
+- CO₂ above `C_HI` + 10% for more than 10 minutes while pinned at the ceiling → log it. That is a
+  capacity problem (or the intake grille), not something the controller can fix by trying harder.
+- Any reading **below 300 ppm** → flag as a probable calibration fault. NDIR sensors self-calibrate
+  by assuming they periodically see outdoor air; a flat that never gets down to outdoor CO₂ will
+  drift, and a drifted zero silently shifts the whole band.
 
 There is **no bedroom sleep CO₂ threshold** any more. If 50 turns out to be audible in practice,
 lower `sleepMaxLevel` — do not reintroduce CO₂-based occupancy inference.
