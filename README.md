@@ -50,11 +50,16 @@ here.
 
 | | | |
 |---|---|---|
-| [`src/control/policy.ts`](src/control/policy.ts) | 142 lines | CO₂ → a demanded level, plus whether anyone is asleep |
-| [`src/control/limiter.ts`](src/control/limiter.ts) | 87 lines | the sleep cap, and the one timing rule |
-| [`src/domain/precedence.ts`](src/domain/precedence.ts) | 61 lines | which instrument answers for a room |
-| [`src/control/freshness.ts`](src/control/freshness.ts) | 33 lines | whether a reading still counts |
-| [`src/config.ts`](src/config.ts) | 170 lines | the whole topology and every tunable number |
+| [`src/control/policy.ts`](src/control/policy.ts) | ~145 lines | CO₂ → a demanded level, plus whether anyone is asleep |
+| [`src/control/limiter.ts`](src/control/limiter.ts) | ~85 lines | the sleep cap, and the one timing rule |
+| [`src/domain/precedence.ts`](src/domain/precedence.ts) | ~60 lines | which instrument answers for a room |
+| [`src/control/freshness.ts`](src/control/freshness.ts) | ~35 lines | whether a reading still counts |
+| [`src/config.ts`](src/config.ts) | ~180 lines | the whole topology and every tunable number |
+
+If you want to see the code that talks to hardware rather than the code that
+decides, read [`src/actuator/modbus-tcp.ts`](src/actuator/modbus-tcp.ts) — ~280 lines of
+hand-rolled Modbus TCP, two function codes against one register, tested byte by byte against a
+fake stream and verified end to end against the real unit.
 
 Then the tests, which are meant to read as sentences:
 
@@ -67,7 +72,7 @@ actually clears. A stale low reading does not suppress a boost. The unit is at 7
 begin and drops at once — because the cap is evaluated against where the unit *is*, not only
 against a freshly computed target.
 
-About 1,250 lines of source and 2,100 of tests, no runtime dependencies.
+Around 1,600 lines of source and 2,800 of tests, no runtime dependencies.
 
 ## Four decisions worth knowing before you read
 

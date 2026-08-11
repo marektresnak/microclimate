@@ -632,6 +632,10 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 
 - **Real hardware.** No test talks to the Daphne, Tado or Netatmo. Adapters are exercised against
   fakes; the real integration is verified by hand once, and by the thing running.
+
+  **Done for the Daphne, 2026-08-11:** read 50%, wrote 70%, read back 70%, wrote 50%, read back
+  50% — first attempt, against the unit in the flat. That is the check a fake stream cannot make,
+  and it is a one-off by design: a suite that needs the hardware powered on is a suite nobody runs.
 - **Wall-clock timing.** Nothing sleeps. Dwell, quiet hours and freshness are all tested by
   passing different values of `now`.
 - **SQLite itself.** We test our queries and constraints, not the engine's.

@@ -180,6 +180,11 @@ and `~/RiderProjects/DaphneControl` (both proven against the real unit):
 convention clash — documentation numbers registers from 1, the wire numbers them from 0. It is
 not a bug and must not be "corrected". Put this in a comment at the call site.
 
+**The TypeScript client has been verified against the real unit**, not only against a fake stream:
+on 2026-08-11 it read 50%, wrote 70%, read back 70%, wrote 50% and read back 50%, first attempt.
+Every recovered detail above therefore now holds for this code and not just for the C# spikes —
+framing, transaction ids, the register number and the ×10 encoding.
+
 Because FC3 reads back successfully, **the current level is observable**. `/api/state` reports
 desired and actual separately, and a mismatch means someone used the wall panel.
 

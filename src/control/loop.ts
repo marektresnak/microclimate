@@ -99,13 +99,8 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
       // is the highest level we are allowed to hold it at.
       currentLevel = actualLevel === undefined ? CONTROL.safeDefaultLevel : underTheCeiling(actualLevel);
     } else if (actualLevel !== undefined && actualLevel !== currentLevel) {
-      // Reported, not acted on. We keep deciding from our own level, and the next
-      // change we make for our own reasons overwrites whatever is there.
-      //
       // "Holding", not "commanded": after a failed read at startup the level is
-      // an assumption we adopted rather than anything we ever sent, and a line
-      // that accuses the wall panel of a mismatch we invented is worse than no
-      // line at all.
+      // an assumption we adopted rather than anything we ever sent.
       dependencies.log(
         `the unit reports ${actualLevel}% and we are holding ${currentLevel}% — ` +
           `the wall panel, or a write that did not land`,

@@ -30,11 +30,8 @@ export function decide(snapshot: Snapshot, now: number): Decision {
   const desiredLevel = withHysteresis(worst.value, snapshot.currentLevel);
   reasons.push(`the band puts ${rounded} ppm at ${fromBand}%`);
 
-  // Says what the bias did, and does not say whether the level moved. An earlier
-  // wording claimed "holding X%" here, which was false on the two ticks out of
-  // three where the bias produces a *different target* rather than a standstill
-  // — and it then contradicted the limiter's own reason on the same line.
-  // Whether anything is held is the limiter's sentence to write, not this one's.
+  // Says what the bias did, not whether the level moved. Whether anything is
+  // held is the limiter's sentence to write.
   if (desiredLevel !== fromBand) {
     reasons.push(`${desiredLevel}% after ${CONTROL.hysteresisPpm} ppm of hysteresis in the direction of travel`);
   }
