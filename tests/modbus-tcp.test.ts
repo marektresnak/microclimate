@@ -4,15 +4,18 @@ import { describe, it } from 'node:test';
 import { createModbusUnit } from '../src/actuator/modbus-tcp.ts';
 import type { ByteStream, ModbusUnitOptions, OpenStream } from '../src/actuator/modbus-tcp.ts';
 
-// Short enough that the one test which waits for a timeout waits five
-// milliseconds. Nothing else here touches the clock. The host is deliberately
-// not the real unit's address — nothing here dials anything, and a fixture that
-// names a live device invites somebody to find out.
+// Short enough that the two tests which wait a timeout out wait a tenth of a
+// second — but not shorter, because the budget is measured on the real clock
+// around every connect, and with the whole suite's files running in parallel
+// the event loop can spend five milliseconds on scheduling alone. At 5 this
+// flaked exactly that way. The host is deliberately not the real unit's
+// address — nothing here dials anything, and a fixture that names a live
+// device invites somebody to find out.
 const OPTIONS: ModbusUnitOptions = {
   host: 'unit.invalid',
   port: 502,
   unitId: 1,
-  timeoutMs: 5,
+  timeoutMs: 100,
   retries: 0,
   retryPauseMs: 0,
 };
