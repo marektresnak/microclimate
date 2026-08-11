@@ -163,7 +163,7 @@ describe('talking over a real socket', () => {
     try {
       await assert.rejects(
         createModbusUnit(options(server.port)).read(),
-        /did not answer within \d+ ms/,
+        /did not answer in the \d+ ms left/,
       );
     } finally {
       await server.close();

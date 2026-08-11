@@ -28,6 +28,8 @@ const WRITE_SINGLE_REGISTER = 0x06;
 const EXCEPTION_FLAG = 0x80;
 const MBAP_HEADER_BYTES = 7;
 const MBAP_LENGTH_OFFSET = 4;
+// One unit id plus the largest PDU Modbus allows.
+const MAX_MBAP_LENGTH = 254;
 
 /**
  * A raw byte stream, so the protocol can be tested without a socket. Chunk
@@ -59,6 +61,14 @@ export function createModbusUnit(
   options: ModbusUnitOptions,
   openStream: OpenStream = openTcpStream,
 ): VentilationUnit {
+  // Anything from outside narrows here, and the unit id is the one that bites:
+  // Number("banana") is NaN, a Uint8Array coerces NaN to 0, and 0 is the Modbus
+  // broadcast address — the unit would act on a write and never reply, so a
+  // command that landed would be reported as having failed.
+  if (!Number.isInteger(options.unitId) || options.unitId < 1 || options.unitId > 247) {
+    throw new Error(`unit id ${options.unitId} is not a Modbus slave address (1-247)`);
+  }
+
   // Monotonic across the process, so a reply to an earlier request can never be
   // mistaken for the answer to this one.
   let lastTransactionId = 0;
@@ -155,6 +165,10 @@ export function createModbusUnit(
       // means something else is on the wire, and reporting success would leave
       // the loop believing a level the unit never took.
       const body = await ask(request, WRITE_SINGLE_REGISTER);
+      if (body.length < 4) {
+        throw new Error(`expected the register and value echoed back, the unit sent a ${body.length}-byte body`);
+      }
+
       const echoedRegister = fromBigEndian(body, 0);
       const echoedValue = fromBigEndian(body, 2);
 
@@ -235,17 +249,25 @@ function sendAndWait(
     let received: Uint8Array = new Uint8Array(0);
 
     const timer = setTimeout(() => {
-      reject(new Error(`the unit did not answer within ${Math.round(timeoutMs)} ms`));
+      reject(new Error(`the unit did not answer in the ${Math.round(timeoutMs)} ms left after connecting`));
     }, timeoutMs);
 
     stream.listen(
       (chunk) => {
         received = concat(received, chunk);
-        const frame = completeFrame(received);
-        if (frame === undefined) return;
 
-        clearTimeout(timer);
-        resolve(frame);
+        try {
+          const frame = completeFrame(received);
+          if (frame === undefined) return;
+
+          clearTimeout(timer);
+          resolve(frame);
+        } catch (error) {
+          // A malformed length claim is the peer answering badly, not silence.
+          // Escaping this handler would put it on the socket instead.
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
       },
       (error) => {
         clearTimeout(timer);
@@ -259,10 +281,20 @@ function sendAndWait(
 
 // TCP may deliver a frame in any number of chunks. The MBAP length field says
 // how many bytes follow it, and is the only way to know where a frame ends.
+//
+// It is also the one number on this transport that a peer chooses for us, so it
+// is bounded. A frame is at most a unit id and a 253-byte PDU; believing a claim
+// of 65535 means waiting out the whole budget for bytes that will never arrive,
+// while buffering whatever does — and then retrying the same garbage.
 function completeFrame(received: Uint8Array): Uint8Array | undefined {
   if (received.length < MBAP_HEADER_BYTES - 1) return undefined;
 
-  const total = MBAP_LENGTH_OFFSET + 2 + fromBigEndian(received, MBAP_LENGTH_OFFSET);
+  const declared = fromBigEndian(received, MBAP_LENGTH_OFFSET);
+  if (declared > MAX_MBAP_LENGTH) {
+    throw new Error(`the answer declares ${declared} bytes, more than a Modbus frame can hold`);
+  }
+
+  const total = MBAP_LENGTH_OFFSET + 2 + declared;
   return received.length < total ? undefined : received.slice(0, total);
 }
 

@@ -189,6 +189,18 @@ describe('reading the level back', () => {
   });
 });
 
+describe('options', () => {
+  it('refuses a unit id that is not a Modbus slave address', () => {
+    // Number("banana") is NaN, a Uint8Array turns NaN into 0, and 0 is the
+    // broadcast address: the unit would act on a write and never answer, so a
+    // command that landed would be reported as failed.
+    assert.throws(() => createModbusUnit({ ...OPTIONS, unitId: Number.NaN }), /not a Modbus slave address/);
+    assert.throws(() => createModbusUnit({ ...OPTIONS, unitId: 0 }), /not a Modbus slave address/);
+    assert.throws(() => createModbusUnit({ ...OPTIONS, unitId: 248 }), /not a Modbus slave address/);
+    assert.throws(() => createModbusUnit({ ...OPTIONS, unitId: 1.5 }), /not a Modbus slave address/);
+  });
+});
+
 describe('connections', () => {
   it('closes every connection it opens, on success and on failure', async () => {
     // The leak this guards is invisible to the loopback tests too, because the
@@ -209,7 +221,7 @@ describe('connections', () => {
     // "five second" attempt take ten, and enough of those overrun the
     // thirty-second cycle the whole operation is supposed to sit inside.
     const slowToOpen: OpenStream = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 250));
       return { send: () => undefined, listen: () => undefined, close: () => undefined };
     };
 
@@ -219,7 +231,19 @@ describe('connections', () => {
     await assert.rejects(unit.read());
     const elapsed = performance.now() - startedAt;
 
-    assert.ok(elapsed < 400, `one attempt took ${Math.round(elapsed)} ms of a 300 ms budget`);
+    // 300 ms if the budget is shared, 550 if each phase gets its own.
+    assert.ok(elapsed < 430, `one attempt took ${Math.round(elapsed)} ms of a 300 ms budget`);
+  });
+
+  it('fails honestly when connecting used the whole budget', async () => {
+    const slowerThanTheBudget: OpenStream = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return { send: () => undefined, listen: () => undefined, close: () => undefined };
+    };
+
+    const unit = createModbusUnit({ ...OPTIONS, timeoutMs: 30, retries: 0 }, slowerThanTheBudget);
+
+    await assert.rejects(unit.read(), /used the whole 30 ms/);
   });
 
   it('opens a new connection for every attempt', async () => {
@@ -314,6 +338,27 @@ describe('the wire', () => {
     await unitOver(fake).set(50);
   });
 
+  it('refuses a declared length no Modbus frame could have', async () => {
+    // The one number on this transport the peer chooses for us. Believing a
+    // claim of 65535 means waiting out the whole budget for bytes that never
+    // come, buffering whatever does, and then retrying the same garbage — while
+    // the log says silence and the peer is in fact answering.
+    const fake = fakeStreams(() => [frame(0x00, 0x01, 0x00, 0x00, 0xff, 0xff, 0x01, 0x06)]);
+
+    await assert.rejects(unitOver(fake).set(50), /declares 65535 bytes, more than a Modbus frame/);
+  });
+
+  it('rejects a write echo too short to read', async () => {
+    const fake = fakeStreams(() => [
+      frame(0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x01, 0x06, 0x52, 0x09),
+    ]);
+
+    await assert.rejects(
+      unitOver(fake).set(50),
+      /expected the register and value echoed back, the unit sent a 2-byte body/,
+    );
+  });
+
   it('surfaces a Modbus exception instead of swallowing it', async () => {
     // The original C# spike caught these into an empty block, which is how a
     // refused write became a silent no-op.
@@ -338,7 +383,7 @@ describe('the wire', () => {
   it('errors rather than hanging when the unit says nothing', async () => {
     const fake = fakeStreams(() => []);
 
-    await assert.rejects(unitOver(fake).set(50), /did not answer within \d+ ms/);
+    await assert.rejects(unitOver(fake).set(50), /did not answer in the \d+ ms left/);
   });
 
   it('retries a request that timed out, and succeeds on a later attempt', async () => {
