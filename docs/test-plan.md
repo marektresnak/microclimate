@@ -160,6 +160,10 @@ still read every tick and reported next to the desired level, so a wall-panel ch
 The controller no longer compares them or acts on the difference. What R4 bought back — a hand-set
 80 at 23:30 being pulled to 50 — is given up, and the log will say so rather than hide it.
 
+> **S1 was partly reversed after implementation — see S6.** Giving that up turned out to mean the
+> one hard requirement in the product losing to a button press, which is not a thing a review
+> budget gets to decide.
+
 **S2 — the `control_state` table is CUT** (reverses F5 and R6), and with it the clamp-on-read and
 the unreadable-row-is-an-error rule. Two guards existed only to protect one guard. The dwell timer
 lives in memory and resets on restart; a crash loop is a thing to fix, not to rate-limit. The
@@ -192,7 +196,30 @@ asleep after 07:00 drops the cap.
 been: ASHRAE Guideline 36 specifies it, it is the only way a capacity problem announces itself
 rather than looking like a control failure, and it is one line plus one timestamp.
 
-**What this round did *not* touch**, listed so the cuts read as targeted rather than
+**S6 — cap-breach enforcement is RESTORED, and nothing else with it** (partly reverses S1). This
+one came from reading the finished code rather than the design: with S1 in place, a level hand-set
+above `sleepMaxLevel` at 23:30 runs until morning, because the loop compares its own last command
+to its own target, finds them equal and writes nothing.
+
+The rule is now: if the unit is above the cap while sleep is asserted, that level is handed to the
+limiter as where the unit really is, and the cap path already there pulls it back in one move.
+Everything else about the read-back stays reported-and-ignored.
+
+Three positions have now been occupied, and the middle one is the right one:
+
+| | daytime hand-set | night hand-set above the cap |
+|---|---|---|
+| reassert always (original) | overwritten within 30 s | corrected |
+| reassert never (S1) | survives until we change our mind | **runs all night** |
+| **cap breach only (S6)** | survives until we change our mind | corrected in one move |
+
+It costs one conditional and no new concept — the cap path, the immediacy, the dwell bypass and
+the not-touching-`lastChangeAt` were all already built and tested. It is also *better* than the
+original: a hand-set level **below** the cap is never undone now, where the original pushed a
+hand-set 30 back up to 50. The panel stays good for making the flat quieter, which is what anyone
+reaching for it at 2am actually wants.
+
+**What the first five cuts did *not* touch**, listed so they read as targeted rather than
 indiscriminate: the proportional band and its hysteresis, worst-room-wins demand, stale and
 missing excluded in both directions, the safe default when blind, the cap applied to the current
 level rather than only to computed targets, decreases at one step per ten minutes, the two level
@@ -494,9 +521,13 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - **a wall-panel level above the ceiling is readable** — the unit reports 100, which is a valid
   `Level`; reading it must not throw. Commanding it must not typecheck, and `assertCommandedLevel`
   must throw on it at runtime, because type stripping checks nothing.
-- since S1 the controller does not pull a hand-set level back on its own; it is pulled back by the
-  next change the controller makes for its own reasons. Assert the visibility instead: the loop
-  reports the actual level alongside the desired one whenever they disagree.
+- **a hand-set level above the cap, while asleep, is corrected in one move** (S6). Unit at 80 at
+  02:00: the next tick commands `sleepMaxLevel`, not a walk down over forty minutes and not
+  "no change needed".
+- **a hand-set level below the cap is left alone**, asleep or not — the panel stays usable for
+  making the flat quieter.
+- **a hand-set level in the daytime is reported and left alone**, and pulled back only by the next
+  change the controller makes for its own reasons.
 
 ## `ingest/http.ts`
 

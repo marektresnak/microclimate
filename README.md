@@ -139,7 +139,12 @@ Sensor topology lives in config rather than the database, on purpose: it gives l
 for room and sensor ids, so a typo is a compile error, and git records *why* a sensor moved in a
 way a table never could.
 
-**Two gaps are known and accepted rather than overlooked.** If the service dies, the unit holds its
-last commanded level indefinitely — a shutdown handler covers only graceful exits, and partial
-cover that reads as protection is worse than a known gap. And a level set by hand at the wall panel
-is reported but not corrected; it stands until the controller changes its mind for its own reasons.
+**One gap is known and accepted rather than overlooked.** If the service dies, the unit holds its
+last commanded level indefinitely — a shutdown handler covers only graceful exits, a hard crash or
+power cut bypasses it entirely, and partial cover that reads as protection is worse than a known
+gap. The honest fix is a device-side watchdog that does not exist.
+
+**The wall panel is honoured in one direction only.** A level set by hand is reported but not
+corrected — except when it would run the fan above the sleep cap while somebody is asleep, which is
+pulled back on the next tick. Making the flat quieter always wins; making it louder than the night
+cap never does.

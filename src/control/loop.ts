@@ -123,7 +123,21 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
     };
 
     const decision = decide(snapshot, now);
-    const outcome = limit(decision, currentLevel, lastChangeAt, now);
+
+    // The one place the read-back is acted on, and the reason it is read at all.
+    // "Not audible at night" is the hard requirement, so a level someone set
+    // *above* the sleep cap is handed to the limiter as where the unit really is,
+    // and its existing cap path pulls it back in one move.
+    //
+    // A level set below the cap is left alone. A quieter fan harms nobody, and
+    // the panel should stay good for that — which is more than the original
+    // design allowed, where a hand-set 30 was pushed back up to 50.
+    const observed =
+      decision.sleeping && actualLevel !== undefined && actualLevel > CONTROL.sleepMaxLevel
+        ? underTheCeiling(actualLevel)
+        : currentLevel;
+
+    const outcome = limit(decision, observed, lastChangeAt, now);
     wasSleeping = decision.sleeping;
 
     const landed = outcome.write ? await command(outcome.level) : true;

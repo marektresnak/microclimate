@@ -136,23 +136,26 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   flat cannot pass enough air above roughly 80%, so running higher makes the fan work against a
   restriction: noisy, inefficient, and it unbalances supply against extract on a heat-recovery
   unit. The device would accept 90 and 100. **We never send them.**
-- There is a wall panel. Someone may change the level by hand. **We do not track it and we do not
-  correct it.** We read the actual level back every tick and report it next to the desired level in
-  `/api/state`, so a mismatch is visible — but the controller decides from its own last commanded
-  value and nothing else. A hand-set level therefore survives until our decision changes, and is
-  overwritten silently when it does.
+- There is a wall panel. Someone may change the level by hand. **We act on that in exactly one
+  case: when it would make the flat loud while somebody is asleep.**
 
-  This is a deliberate simplification, and it has a known cost. An earlier revision reconciled the
-  read-back every tick specifically so that a hand-set 80 at 23:30 could not run all night while
-  the log reported *"level 50, no change needed"*. That case is now real again: with the target
-  equal to what we last commanded, we write nothing, and the hand-set level stands. **The mismatch
-  is visible in `/api/state` and in the logs; it is simply not acted on.**
+  The actual level is read back every tick and reported next to the desired level in `/api/state`,
+  so any mismatch is visible. If the unit is above `sleepMaxLevel` while sleep is asserted, that
+  level is handed to the limiter as where the unit really is, and the existing cap path pulls it
+  back in one move. Otherwise the controller decides from its own last commanded value, and the
+  hand-set level survives until our decision changes for its own reasons.
 
-  Two mechanisms were removed to buy that: the tick-by-tick comparison, and the cap-breach
-  correction path that hung off it. What is left is one rule — *decide, and write when the decision
-  changes* — which is the thing that has to be explained in an interview. If living with the unit
-  shows that hand-set levels are a real nuisance rather than a hypothetical one, the honest fix is
-  to reinstate read-back reconciliation as a single mechanism, not to add a detector for it.
+  **A hand-set level *below* the cap is never undone.** A quieter fan harms nobody, so the panel
+  stays good for the thing people actually reach for it at night. That is strictly better than the
+  original design, which reasserted unconditionally and pushed a hand-set 30 back up to 50.
+
+  This is the third position this decision has occupied, and the reasoning for landing here is
+  worth keeping. Reasserting *always* makes the panel useless, which two independent reviewers
+  argued against. Reasserting *never* — briefly the design, for one round — means a hand-set 80 at
+  23:30 runs all night while the log reports *"50% held"*, so the one hard requirement in the
+  product loses to a button press. **Correcting only a breach of the cap is the smallest mechanism
+  that makes the hard requirement actually hard**, and the asymmetry it introduces is one sentence:
+  we ignore the panel except when it would make the flat loud while someone is asleep.
 - **If the service dies, the unit holds its last commanded level indefinitely.** There is no
   watchdog and we do not set a safe level on shutdown. A crash at 21:30 with the unit at 80 leaves
   it audible all night, and the next night too. Accepted, and re-affirmed after a reviewer pressed
@@ -570,10 +573,14 @@ Pipeline, in order:
 8. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80). The type
    does this at compile time; `assertCommandedLevel` does it at runtime for anything crossing a
    boundary, because type stripping performs no checking at all.
-9. **Read the unit's actual level back every tick** (FC3, already verified) and report it. It is
-   surfaced next to the desired level in `/api/state` and logged when the two disagree, which is
-   the only way to see that someone used the wall panel. **The controller does not act on it** —
-   see the actuator section for what that costs.
+9. **Read the unit's actual level back every tick** (FC3, already verified). It is surfaced next to
+   the desired level in `/api/state` and logged when the two disagree, which is how a wall-panel
+   change becomes visible.
+
+   **It is acted on in one case only:** if the unit is above `sleepMaxLevel` while sleep is
+   asserted, that level is passed to the limiter in place of our own, and step 6's cap path pulls
+   it back in one move. Everything else is reported and left alone. See the actuator section for
+   why this is the position rather than always or never.
 
 **On steps 3, 5 and 7 together:** the band's *width* sets the loop gain and is what makes
 convergence provable; hysteresis stops boundary chatter; the one-step-per-dwell decrease stops the

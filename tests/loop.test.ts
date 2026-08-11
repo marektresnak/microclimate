@@ -236,22 +236,23 @@ describe('the control loop', () => {
     store.close();
   });
 
-  it('reports a hand-set level without acting on it', async () => {
-    // The documented cost of dropping read-back reconciliation: the mismatch is
-    // visible, and it is not corrected until the controller changes its mind.
+  it('reports a hand-set level in the daytime without acting on it', async () => {
+    // Outside the sleep cap there is no requirement to enforce, so the mismatch
+    // is visible and left alone: the panel wins until the controller changes its
+    // mind for its own reasons. Compare the night case above, where it does not.
     const store = openReadingStore(':memory:');
     const unit = createFakeUnit(20);
     const log = recorder();
     const loop = createControlLoop({
-      sources: [co2Source('netatmo', 500, NIGHT)],
+      sources: [liveCo2Source('netatmo', 500).source],
       store,
       unit,
       log: log.log,
     });
 
-    await loop.tick(NIGHT);
+    await loop.tick(MIDDAY);
     unit.level = 80;
-    await loop.tick(NIGHT + 30_000);
+    await loop.tick(MIDDAY + 30_000);
 
     assert.match(log.lines.join('\n'), /the unit reports 80% and we are holding 20%/);
     assert.deepEqual(unit.commands, []);
@@ -284,6 +285,51 @@ describe('the control loop', () => {
     assert.equal(state.desiredLevel, 80); // what the air actually demands
     assert.equal(state.sleeping, true);
     assert.match(state.reasons.join(' '), /1400 ppm/);
+    store.close();
+  });
+
+  it('pulls a hand-set level back under the sleep cap, in one move', async () => {
+    // The hard requirement is silence in the bedroom at night. Without this the
+    // panel defeats it: the loop would compare its own last command to its own
+    // target, find them equal, write nothing, and log "50% held" for eight hours
+    // while the fan ran at 80.
+    const store = openReadingStore(':memory:');
+    const unit = createFakeUnit(20);
+    const loop = createControlLoop({
+      sources: [liveCo2Source('netatmo', 900).source],
+      store,
+      unit,
+      log: recorder().log,
+    });
+
+    await loop.tick(NIGHT);
+    unit.level = 80; // somebody presses the wall panel at 02:00
+    await loop.tick(NIGHT + 30_000);
+
+    assert.equal(unit.level, CONTROL.sleepMaxLevel);
+    assert.deepEqual(unit.commands, [40, CONTROL.sleepMaxLevel]);
+    store.close();
+  });
+
+  it('leaves a hand-set level below the cap alone', async () => {
+    // Quieter than we asked for harms nobody, so the panel stays usable for the
+    // thing people actually want it for at night. The original design pushed a
+    // hand-set 30 back up to 50; this does not.
+    const store = openReadingStore(':memory:');
+    const unit = createFakeUnit(20);
+    const loop = createControlLoop({
+      sources: [liveCo2Source('netatmo', 900).source],
+      store,
+      unit,
+      log: recorder().log,
+    });
+
+    await loop.tick(NIGHT);
+    unit.level = 30;
+    await loop.tick(NIGHT + 30_000);
+
+    assert.equal(unit.level, 30);
+    assert.deepEqual(unit.commands, [40]);
     store.close();
   });
 
