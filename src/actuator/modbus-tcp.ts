@@ -61,10 +61,15 @@ export function createModbusUnit(
   options: ModbusUnitOptions,
   openStream: OpenStream = openTcpStream,
 ): VentilationUnit {
-  // Anything from outside narrows here, and the unit id is the one that bites:
+  // The unit id is narrowed because its bad values fail *silently*:
   // Number("banana") is NaN, a Uint8Array coerces NaN to 0, and 0 is the Modbus
   // broadcast address — the unit would act on a write and never reply, so a
   // command that landed would be reported as having failed.
+  //
+  // The host and port get no such guard, deliberately. A nonsense port fails
+  // loudly on every attempt with the operating system's own message, which the
+  // loop logs and recovers from; there is nothing silent to protect against, and
+  // a guard per field would be ceremony rather than defence.
   if (!Number.isInteger(options.unitId) || options.unitId < 1 || options.unitId > 247) {
     throw new Error(`unit id ${options.unitId} is not a Modbus slave address (1-247)`);
   }
@@ -118,8 +123,15 @@ export function createModbusUnit(
         continue;
       }
 
-      // The unit answered. Whether or not we like the answer, asking again gets
-      // the same one — so anything wrong with it is thrown rather than retried.
+      // A frame arrived. Whether or not we like it, asking again gets the same
+      // answer — so anything wrong with it here is thrown rather than retried.
+      //
+      // Note where the line falls: a frame we cannot even delimit, because the
+      // declared length is nonsense, fails during reassembly above and *is*
+      // retried. That is deliberate. Failing to frame means the connection is
+      // not carrying Modbus at all, and a fresh one is worth trying; failing to
+      // agree with a frame we did read means the unit has answered and will
+      // answer the same way again.
       return readAnswer(response, request, expectedCode, options.unitId);
     }
 
