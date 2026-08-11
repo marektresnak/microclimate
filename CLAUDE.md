@@ -421,7 +421,7 @@ src/
                         last decision through state() for /api/state.
   actuator/
     unit.ts             VentilationUnit interface
-    modbus-tcp.ts       real implementation, FC3 + FC6        (not built yet)
+    modbus-tcp.ts       real implementation, FC3 + FC6
     fake.ts             test double, records calls
   http/
     server.ts           the read API                          (not built yet)

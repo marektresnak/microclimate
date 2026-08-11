@@ -3,10 +3,13 @@
 Collects readings from the sensors in my flat, stores them, and drives the HRV (heat-recovery
 ventilation) unit based on air quality — primarily CO₂.
 
-> **Status.** The control core is built and tested: config and domain types, freshness,
-> precedence, the policy, the limiter, the store, the loop, and a scripted-trace suite. The vendor
-> adapters (Tado, Netatmo), the Modbus TCP adapter, the ingest endpoint and the read API exist as
-> interfaces and fakes only — see [Not built yet](#not-built-yet).
+> **Status.** The control core is built and tested — config and domain types, freshness,
+> precedence, the policy, the limiter, the store, the loop, a scripted-trace suite — as is the
+> Modbus TCP client that drives the hardware. The vendor adapters (Tado, Netatmo), the ingest
+> endpoint and the read API are not built; see [Not built yet](#not-built-yet).
+>
+> `npm start` runs the whole loop against synthetic sensors and a recording fake unit. Set
+> `HRV_MODBUS_HOST` and it drives the real one instead.
 
 ## The problem
 
@@ -100,7 +103,8 @@ dependencies at all.
 
 ```sh
 npm install
-npm start      # synthetic sensors, recording fake unit, logs every decision with its reasoning
+npm start                             # synthetic sensors, fake unit, logs every decision
+HRV_MODBUS_HOST=192.168.0.65 npm start  # …driving the real HRV unit over Modbus TCP
 ```
 
 ```sh
@@ -118,8 +122,6 @@ the air. A suite that runs green without a typecheck would not notice the guard 
 Interfaces and fakes stand in for all of these; none of them changes the control core.
 
 - **Tado and Netatmo adapters.** `SensorSource` is the seam; `sources/synthetic.ts` stands in.
-- **Modbus TCP.** `VentilationUnit` is the seam; `actuator/fake.ts` stands in. The protocol details
-  are recovered and recorded in `CLAUDE.md` — register 21001, percent × 10, FC3 and FC6.
 - **`POST /api/readings`** and the JSON read API. The seams are in place: `resolveSignal` is the
   same function the controller uses, so `/api/state` cannot disagree with it, and the loop already
   exposes its last decision — level held, level the unit reports, demand before the cap, reasons —
