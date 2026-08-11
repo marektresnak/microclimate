@@ -18,8 +18,26 @@ export interface ControlLoopDependencies {
   readonly log: (line: string) => void;
 }
 
+/**
+ * The last decision, as the loop currently understands the world. This is what
+ * `/api/state` serves: `level` and `actualLevel` are reported separately because
+ * a mismatch means someone used the wall panel, and `desiredLevel` is demand
+ * *before* the sleep cap, so "demand 80, held at 50 because the flat is asleep"
+ * can be read off rather than inferred.
+ */
+export interface LoopState {
+  readonly decidedAt: number;
+  readonly level: CommandedLevel;
+  readonly actualLevel: Level | undefined;
+  readonly desiredLevel: CommandedLevel;
+  readonly sleeping: boolean;
+  readonly reasons: readonly string[];
+}
+
 export interface ControlLoop {
   tick(now: number): Promise<void>;
+  /** Undefined until the first tick has run. */
+  state(): LoopState | undefined;
 }
 
 /**
@@ -41,6 +59,7 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
   let lastChangeAt: number | undefined;
   let wasSleeping = false;
   let pinnedSince: number | undefined;
+  let lastState: LoopState | undefined;
 
   async function tick(now: number): Promise<void> {
     for (const source of dependencies.sources) {
@@ -124,6 +143,15 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
     // the same reason — after a failed write those are different levels.
     reportCapacity(snapshot, currentLevel, now);
 
+    lastState = {
+      decidedAt: now,
+      level: currentLevel,
+      actualLevel,
+      desiredLevel: decision.desiredLevel,
+      sleeping: decision.sleeping,
+      reasons: outcome.reasons,
+    };
+
     const action = outcome.write && landed ? 'set' : 'held';
     dependencies.log(`${currentLevel}% ${action} — ${outcome.reasons.join('; ')}`);
   }
@@ -193,7 +221,7 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
     );
   }
 
-  return { tick };
+  return { tick, state: () => lastState };
 }
 
 function underTheCeiling(level: Level): CommandedLevel {

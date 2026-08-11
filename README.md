@@ -120,7 +120,10 @@ Interfaces and fakes stand in for all of these; none of them changes the control
 - **Tado and Netatmo adapters.** `SensorSource` is the seam; `sources/synthetic.ts` stands in.
 - **Modbus TCP.** `VentilationUnit` is the seam; `actuator/fake.ts` stands in. The protocol details
   are recovered and recorded in `CLAUDE.md` — register 21001, percent × 10, FC3 and FC6.
-- **`POST /api/readings`** and the JSON read API.
+- **`POST /api/readings`** and the JSON read API. The seams are in place: `resolveSignal` is the
+  same function the controller uses, so `/api/state` cannot disagree with it, and the loop already
+  exposes its last decision — level held, level the unit reports, demand before the cap, reasons —
+  through `state()`.
 - **The below-300-ppm calibration check.** A reading under 300 ppm means an NDIR sensor's
   self-calibration has drifted, which silently shifts the whole band. It is a check on readings as
   they arrive, so it belongs with the ingest endpoint rather than in the control loop. The other

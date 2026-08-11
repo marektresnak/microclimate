@@ -242,11 +242,22 @@ while running high stays high; at 700 while running low stays low. Same number, 
 ## Scripted trace tests
 
 The tests with time in them. **No physics.** A trace is a hand-written series of `(minute, co2)`
-pairs plus a starting wall-clock time; the harness feeds them to the real control modules, collects
-the commanded levels, and asserts on the *sequence*.
+pairs plus a starting wall-clock time; the harness samples the curve at the instrument's own
+refresh rate and feeds it to **the real control loop** — a real `SensorSource`, a real in-memory
+SQLite store, the recording fake unit — then asserts on the *sequence* of commands.
 
-About 30 lines of harness. It makes no claim to model a flat — it says "here is a CO₂ trace, here
-is what the controller does", which is exactly what a sequence bug needs and no more.
+It makes no claim to model a flat. It says "here is a CO₂ trace, here is what the service does",
+which is exactly what a sequence bug needs and no more.
+
+**The harness must drive `createControlLoop`, not `policy` and `limiter` directly.** It used to
+thread `currentLevel`, `lastChangeAt` and `wasSleeping` itself, which made it a second copy of the
+loop's state machine — and a copy that went on passing while the real one was broken. Mutating
+`wasSleeping = false` inside the loop left all nine traces green, including the one that exists to
+catch precisely that regression. Wiring the tests re-implement is wiring that is not tested.
+
+Driving the loop also puts the fake unit inside the harness, so a trace can make writes fail across
+many ticks. That is the only way to reach the loop's update *ordering*, as distinct from whether it
+threads state at all.
 
 Assertions are on the sequence, not on individual decisions:
 
@@ -278,9 +289,15 @@ Assertions are on the sequence, not on individual decisions:
 - **Hovering at a step boundary.** CO₂ oscillating ±20 ppm around a step edge. Assert no flutter —
   this is what the 60 ppm hysteresis is for.
 - **Threshold boundaries.** CO₂ exactly at `C_LO`, `C_HI`, the sleep threshold, and each step edge.
-- **Restart mid-trace.** The limiter is rebuilt with no history. Assert it acts on the next cycle
-  rather than waiting out a dwell — that is the documented consequence of S2, and the trace is
-  where it is visible rather than merely asserted.
+- **Restart mid-trace.** The loop is rebuilt against the same unit and the same database: it
+  re-reads the level from the hardware and starts with no dwell timer and no sleep memory. Assert
+  it acts on the next cycle rather than waiting out a dwell — the documented consequence of S2.
+- **A write outage across the morning release.** Modbus refuses writes for an hour around the time
+  the bedroom clears. Assert sleep releases during the outage and never re-asserts, and that the
+  loop resumes commanding when the unit comes back. This is the trace that pins the loop's update
+  *ordering*: carrying the sleep state only on ticks whose write succeeded re-creates exactly the
+  self-latching failure the extender exists to prevent, and no other trace can see it, because no
+  other trace has an actuator that fails.
 
 ### What this deliberately cannot do
 
@@ -545,11 +562,13 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
   it at 90 or 100; if that read fails, the safe default stands in
 - **the read-back is reported, not acted on** (S1): move the fake unit's level by hand, and the
   loop logs the disagreement while its decision continues from its own last commanded value
-- **the loop carries `wasSleeping` and `lastChangeAt` from one tick to the next.** Both need a test
-  *here* and not only in the traces: the trace harness threads that state itself, so it goes on
-  passing when the loop stops threading it. Wiring that the tests re-implement is wiring that is
-  not tested. The two cases are the 07:00 cap hold across real ticks, and twenty minutes of
-  evaluations producing three steps down rather than six.
+- **the loop carries `wasSleeping` and `lastChangeAt` from one tick to the next.** The traces cover
+  this too, now that they drive the real loop, and these stay as the direct statement of it: a
+  failing fourteen-hour trace reports "sleep re-asserted at minute 688", while these report
+  "commands were [50, 80], expected [50]". Same requirement, one of them debuggable in seconds.
+- **`state()` reports the last decision** — the level we are holding, the level the unit reports,
+  demand before the cap, and the reasons. This is what `/api/state` serves, and what lets the trace
+  harness assert on a decision rather than only on the commands that came out of it.
 - **the pinned-at-ceiling diagnostic** fires after 10 minutes at the ceiling with CO₂ above
   `C_HI` + 10%, and not before; it repeats at most once per window while the condition lasts; and
   the 10 minutes start again from the moment it clears. Three assertions rather than one, because

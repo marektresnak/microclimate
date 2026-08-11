@@ -258,6 +258,35 @@ describe('the control loop', () => {
     store.close();
   });
 
+  it('reports desired and actual separately, which is what makes a mismatch visible', async () => {
+    // The shape /api/state serves. Reporting one number would make "the fan is
+    // at 80 because someone pressed a button" indistinguishable from "the fan is
+    // at 80 because the air is bad", which is the one thing the endpoint is for.
+    const store = openReadingStore(':memory:');
+    const unit = createFakeUnit(20);
+    const loop = createControlLoop({
+      sources: [liveCo2Source('netatmo', 1400).source],
+      store,
+      unit,
+      log: recorder().log,
+    });
+
+    assert.equal(loop.state(), undefined, 'there is no decision before the first tick');
+
+    await loop.tick(NIGHT);
+    unit.level = 100;
+    await loop.tick(NIGHT + 30_000);
+
+    const state = loop.state();
+    assert.ok(state !== undefined);
+    assert.equal(state.level, CONTROL.sleepMaxLevel); // where we are holding it
+    assert.equal(state.actualLevel, 100); // where the wall panel put it
+    assert.equal(state.desiredLevel, 80); // what the air actually demands
+    assert.equal(state.sleeping, true);
+    assert.match(state.reasons.join(' '), /1400 ppm/);
+    store.close();
+  });
+
   it('does not claim to have commanded a level it only assumed', async () => {
     // The read fails at startup, so the level is adopted from the safe default —
     // nothing was ever sent. When the unit becomes readable and disagrees, the

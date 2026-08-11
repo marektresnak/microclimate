@@ -1,27 +1,34 @@
 import assert from 'node:assert/strict';
 
-import { CONTROL, SENSORS } from '../../src/config.ts';
-import { limit } from '../../src/control/limiter.ts';
-import { decide } from '../../src/control/policy.ts';
-import type { Snapshot } from '../../src/domain/decision.ts';
+import { createFakeUnit } from '../../src/actuator/fake.ts';
+import { CONTROL } from '../../src/config.ts';
+import { createControlLoop } from '../../src/control/loop.ts';
 import { MIN_LEVEL } from '../../src/domain/level.ts';
 import type { CommandedLevel } from '../../src/domain/level.ts';
 import type { Reading } from '../../src/domain/measurement.ts';
-import { resolveSignal } from '../../src/domain/precedence.ts';
+import type { SensorSource } from '../../src/sources/source.ts';
+import { openReadingStore } from '../../src/store/readings.ts';
 
 /**
  * The tests with time in them, and no physics in them.
  *
  * A trace is a hand-written CO2 curve plus a starting wall-clock time. The
- * harness samples the curve at the instrument's own refresh rate, feeds the
- * readings to the real control modules tick by tick, and records what came out.
- * It makes no claim to model a flat — it says "here is a CO2 series, here is
- * what the controller does", which is exactly what a bug that only exists
- * across time needs and no more.
+ * harness samples the curve at the instrument's own refresh rate and feeds it to
+ * **the real control loop** — through a real source, a real SQLite store and the
+ * recording fake unit — then asserts on the sequence of commands. It makes no
+ * claim to model a flat: it says "here is a CO2 series, here is what the service
+ * does", which is what a bug that only exists across time needs and no more.
  *
- * What it structurally cannot answer is whether the loop *converges*, because
- * the controller's actions do not feed back into the series. That needs a plant
- * model, and a plant model needs plant parameters that are currently guesses.
+ * It drives `createControlLoop` rather than calling `policy` and `limiter`
+ * itself. An earlier version threaded `currentLevel`, `lastChangeAt` and
+ * `wasSleeping` in this file, which made it a second copy of the loop's state
+ * machine — and a copy that stayed green while the real one was broken. The
+ * overnight trace exists to catch the 07:00 regression, and it did not notice
+ * when the loop stopped carrying `wasSleeping` at all.
+ *
+ * What it structurally cannot answer is whether the loop *converges*, because the
+ * controller's actions do not feed back into the series. That needs a plant
+ * model, and a plant model needs parameters that are currently guesses.
  */
 export interface TracePoint {
   readonly minute: number;
@@ -33,11 +40,14 @@ export interface TraceOptions {
   readonly startsAt: number;
   readonly minutes: number;
   readonly co2: readonly TracePoint[];
+  /** Where the unit is found at startup. The loop adopts it on the first tick. */
   readonly startLevel?: CommandedLevel;
   /** After this minute the instrument stops reporting. Its last reading goes stale on its own. */
   readonly sensorDiesAtMinute?: number;
-  /** Must land on a tick. The unit keeps its level; the dwell timer and the sleep state do not. */
+  /** Must land on a tick. The loop is rebuilt: the unit keeps its level, the loop's memory does not. */
   readonly restartAtMinute?: number;
+  /** Minutes during which the unit refuses writes, so an outage can span many ticks. */
+  readonly writeFailsBetweenMinutes?: { readonly from: number; readonly to: number };
 }
 
 export interface TraceStep {
@@ -48,52 +58,49 @@ export interface TraceStep {
   readonly wrote: boolean;
 }
 
-export function runTrace(options: TraceOptions): TraceStep[] {
+export async function runTrace(options: TraceOptions): Promise<TraceStep[]> {
   const readings = sampleReadings(options);
+  const store = openReadingStore(':memory:');
+  const unit = createFakeUnit(options.startLevel ?? MIN_LEVEL);
   const steps: TraceStep[] = [];
 
-  let currentLevel: CommandedLevel = options.startLevel ?? MIN_LEVEL;
-  let lastChangeAt: number | undefined;
-  let wasSleeping = false;
+  const build = (): ReturnType<typeof createControlLoop> =>
+    createControlLoop({
+      sources: [instrument(readings)],
+      store,
+      unit,
+      log: () => undefined,
+    });
 
+  let loop = build();
   const totalTicks = Math.floor((options.minutes * 60_000) / CONTROL.evaluationIntervalMs);
 
   for (let tick = 0; tick <= totalTicks; tick += 1) {
     const now = options.startsAt + tick * CONTROL.evaluationIntervalMs;
     const minute = (tick * CONTROL.evaluationIntervalMs) / 60_000;
 
-    if (minute === options.restartAtMinute) {
-      lastChangeAt = undefined;
-      wasSleeping = false;
-    }
+    // A restart is a new loop against the same hardware and the same database:
+    // it re-reads the unit and starts with no dwell timer and no sleep memory.
+    if (minute === options.restartAtMinute) loop = build();
 
-    const reported = readings.filter((reading) => reading.measuredAt <= now);
-    const snapshot: Snapshot = {
-      co2ByRoom: {
-        living_room: resolveSignal('living_room', 'co2', reported, now),
-        kids_room: resolveSignal('kids_room', 'co2', reported, now),
-        bedroom: resolveSignal('bedroom', 'co2', reported, now),
-      },
-      currentLevel,
-      wasSleeping,
-    };
+    unit.failWrites = isInside(options.writeFailsBetweenMinutes, minute);
 
-    const decision = decide(snapshot, now);
-    const outcome = limit(decision, currentLevel, lastChangeAt, now);
+    const commandsBefore = unit.commands.length;
+    await loop.tick(now);
+
+    const state = loop.state();
+    if (state === undefined) throw new Error(`the loop reported no state at minute ${minute}`);
 
     steps.push({
       minute,
-      level: outcome.level,
-      desiredLevel: decision.desiredLevel,
-      sleeping: decision.sleeping,
-      wrote: outcome.write,
+      level: state.level,
+      desiredLevel: state.desiredLevel,
+      sleeping: state.sleeping,
+      wrote: unit.commands.length > commandsBefore,
     });
-
-    currentLevel = outcome.level;
-    lastChangeAt = outcome.lastChangeAt;
-    wasSleeping = decision.sleeping;
   }
 
+  store.close();
   return steps;
 }
 
@@ -141,6 +148,21 @@ export function assertStepwiseDescent(steps: readonly TraceStep[]): void {
   }
 }
 
+// Shaped like the Netatmo: it hands back its current reading whenever asked, so
+// polling faster than it refreshes returns the same row and the store absorbs it.
+function instrument(readings: readonly Reading[]): SensorSource {
+  return {
+    name: 'trace-instrument',
+    pollIntervalMs: 60_000,
+
+    async poll(now: number): Promise<readonly Reading[]> {
+      const reported = readings.filter((reading) => reading.measuredAt <= now);
+      const newest = reported.at(-1);
+      return newest === undefined ? [] : [newest];
+    },
+  };
+}
+
 // The instrument reports on its own schedule, which is what makes "the same
 // reading repeated for eight minutes" a real case rather than a contrived one.
 function sampleReadings(options: TraceOptions): Reading[] {
@@ -183,6 +205,7 @@ function co2At(points: readonly TracePoint[], minute: number): number {
   return previous.co2;
 }
 
-// Named here so a trace can say how long it takes for a dead instrument to be
-// recognised as dead, without repeating the number.
-export const NETATMO_FRESHNESS_MINUTES = SENSORS.bedroom_netatmo.freshnessWindowMs / 60_000;
+function isInside(window: { readonly from: number; readonly to: number } | undefined, minute: number): boolean {
+  if (window === undefined) return false;
+  return minute >= window.from && minute <= window.to;
+}

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 
 import { CONTROL } from '../src/config.ts';
+import type { TraceStep } from './support/trace.ts';
 import {
   assertCapRespected,
   assertStepwiseDescent,
@@ -23,18 +24,22 @@ describe('overnight, clearing late', () => {
   // The regression two independent reviewers found by reasoning, and the reason
   // the CO2 term survived the simplification pass at all. It would have failed
   // here immediately.
-  const steps = runTrace({
-    startsAt: AT_2100,
-    minutes: 780, // 21:00 through 10:00
-    startLevel: 40,
-    co2: [
-      { minute: 0, co2: 600 }, // 21:00, flat evening
-      { minute: 120, co2: 800 }, // 23:00, everyone is in bed
-      { minute: 240, co2: 1300 }, // 01:00, and it stays there
-      { minute: 630, co2: 1300 }, // 07:30, the alarm goes off
-      { minute: 690, co2: 700 }, // 08:30, door open, room clearing
-      { minute: 780, co2: 550 }, // 10:00
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_2100,
+      minutes: 780, // 21:00 through 10:00
+      startLevel: 40,
+      co2: [
+        { minute: 0, co2: 600 }, // 21:00, flat evening
+        { minute: 120, co2: 800 }, // 23:00, everyone is in bed
+        { minute: 240, co2: 1300 }, // 01:00, and it stays there
+        { minute: 630, co2: 1300 }, // 07:30, the alarm goes off
+        { minute: 690, co2: 700 }, // 08:30, door open, room clearing
+        { minute: 780, co2: 550 }, // 10:00
+      ],
+    });
   });
 
   it('never runs above the cap while anyone is asleep', () => {
@@ -72,16 +77,20 @@ describe('the square wave', () => {
   // CO2 rises past the band and falls back within one dwell. With no rate limit
   // at all this produced 20 -> 80 -> 20 with a twenty-minute period, which is
   // precisely the behaviour the project exists to eliminate.
-  const steps = runTrace({
-    startsAt: AT_1200,
-    minutes: 90,
-    startLevel: 20,
-    co2: [
-      { minute: 0, co2: 600 },
-      { minute: 10, co2: 1300 },
-      { minute: 20, co2: 500 },
-      { minute: 90, co2: 500 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_1200,
+      minutes: 90,
+      startLevel: 20,
+      co2: [
+        { minute: 0, co2: 600 },
+        { minute: 10, co2: 1300 },
+        { minute: 20, co2: 500 },
+        { minute: 90, co2: 500 },
+      ],
+    });
   });
 
   it('comes back down one step at a time', () => {
@@ -107,15 +116,19 @@ describe('the square wave', () => {
 
 describe('cooking spike', () => {
   // The asymmetry is the point: a rate limit on increases fails this trace.
-  const steps = runTrace({
-    startsAt: AT_1900,
-    minutes: 60,
-    startLevel: 20,
-    co2: [
-      { minute: 0, co2: 600 },
-      { minute: 20, co2: 1300 },
-      { minute: 60, co2: 1300 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_1900,
+      minutes: 60,
+      startLevel: 20,
+      co2: [
+        { minute: 0, co2: 600 },
+        { minute: 20, co2: 1300 },
+        { minute: 60, co2: 1300 },
+      ],
+    });
   });
 
   it('goes straight to the level the band asks for', () => {
@@ -139,14 +152,18 @@ describe('cooking spike', () => {
 describe('evening at 70 into quiet hours', () => {
   // No new target is computed and demand has not moved, yet the level must still
   // fall — because the cap is evaluated against where the unit is.
-  const steps = runTrace({
-    startsAt: AT_2150,
-    minutes: 30,
-    startLevel: 70,
-    co2: [
-      { minute: 0, co2: 1100 },
-      { minute: 30, co2: 1100 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_2150,
+      minutes: 30,
+      startLevel: 70,
+      co2: [
+        { minute: 0, co2: 1100 },
+        { minute: 30, co2: 1100 },
+      ],
+    });
   });
 
   it('drops at the boundary, not at the next dwell', () => {
@@ -176,14 +193,18 @@ describe("Netatmo's refresh", () => {
   // The same reading repeated for eight minutes at a time. A reviewer once
   // argued this would wind the controller up; it cannot, because nothing here
   // integrates.
-  const steps = runTrace({
-    startsAt: AT_1200,
-    minutes: 60,
-    startLevel: 20,
-    co2: [
-      { minute: 0, co2: 900 },
-      { minute: 60, co2: 900 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_1200,
+      minutes: 60,
+      startLevel: 20,
+      co2: [
+        { minute: 0, co2: 900 },
+        { minute: 60, co2: 900 },
+      ],
+    });
   });
 
   it('acts once and then leaves it alone', () => {
@@ -192,15 +213,19 @@ describe("Netatmo's refresh", () => {
 });
 
 describe('the sensor dies at 02:00', () => {
-  const steps = runTrace({
-    startsAt: AT_2200,
-    minutes: 480, // 22:00 through 06:00
-    startLevel: 20,
-    sensorDiesAtMinute: 240,
-    co2: [
-      { minute: 0, co2: 1300 },
-      { minute: 480, co2: 1300 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_2200,
+      minutes: 480, // 22:00 through 06:00
+      startLevel: 20,
+      sensorDiesAtMinute: 240,
+      co2: [
+        { minute: 0, co2: 1300 },
+        { minute: 480, co2: 1300 },
+      ],
+    });
   });
 
   it('falls back to the safe default rather than trusting the last reading', () => {
@@ -217,20 +242,24 @@ describe('the sensor dies at 02:00', () => {
 
 describe('hovering at a step boundary', () => {
   // The 40/50 boundary is 841.7 ppm. This is what the 60 ppm hysteresis is for.
-  const steps = runTrace({
-    startsAt: AT_1200,
-    minutes: 120,
-    startLevel: 40,
-    co2: [
-      { minute: 0, co2: 822 },
-      { minute: 16, co2: 862 },
-      { minute: 32, co2: 822 },
-      { minute: 48, co2: 862 },
-      { minute: 64, co2: 822 },
-      { minute: 80, co2: 862 },
-      { minute: 96, co2: 822 },
-      { minute: 120, co2: 862 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_1200,
+      minutes: 120,
+      startLevel: 40,
+      co2: [
+        { minute: 0, co2: 822 },
+        { minute: 16, co2: 862 },
+        { minute: 32, co2: 822 },
+        { minute: 48, co2: 862 },
+        { minute: 64, co2: 822 },
+        { minute: 80, co2: 862 },
+        { minute: 96, co2: 822 },
+        { minute: 120, co2: 862 },
+      ],
+    });
   });
 
   it('does not flutter', () => {
@@ -239,15 +268,19 @@ describe('hovering at a step boundary', () => {
 });
 
 describe('a full sweep across every step edge', () => {
-  const steps = runTrace({
-    startsAt: AT_0700,
-    minutes: 840, // 07:00 through 21:00, entirely outside quiet hours
-    startLevel: 20,
-    co2: [
-      { minute: 0, co2: 400 },
-      { minute: 420, co2: 1400 },
-      { minute: 840, co2: 400 },
-    ],
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_0700,
+      minutes: 840, // 07:00 through 21:00, entirely outside quiet hours
+      startLevel: 20,
+      co2: [
+        { minute: 0, co2: 400 },
+        { minute: 420, co2: 1400 },
+        { minute: 840, co2: 400 },
+      ],
+    });
   });
 
   it('visits every step in both directions', () => {
@@ -266,6 +299,60 @@ describe('a full sweep across every step edge', () => {
   });
 });
 
+describe('a write outage across the morning release', () => {
+  // Modbus drops out for an hour around the time the bedroom clears. Sleep
+  // releases during the outage, and when CO2 climbs again later that morning the
+  // extender must not re-latch — it can only ever extend a sleep quiet hours
+  // asserted, and quiet hours ended at 07:00.
+  //
+  // This is the trace that pins the loop's update ordering. Carrying the sleep
+  // state only on ticks whose write succeeded re-creates exactly the
+  // self-latching failure the extender exists to prevent, and it is invisible to
+  // every other trace because none of them has an actuator that fails.
+  let steps: TraceStep[] = [];
+
+  before(async () => {
+    steps = await runTrace({
+      startsAt: AT_2100,
+      minutes: 840, // 21:00 through 11:00
+      startLevel: 40,
+      writeFailsBetweenMinutes: { from: 640, to: 700 }, // 07:40 to 08:40
+      co2: [
+        { minute: 0, co2: 600 },
+        { minute: 240, co2: 1300 }, // 01:00, and it stays there
+        { minute: 600, co2: 1300 }, // 07:00, quiet hours end
+        { minute: 660, co2: 600 }, // 08:00, the room clears
+        { minute: 720, co2: 900 }, // 09:00, and fills again with the door shut
+        { minute: 840, co2: 900 },
+      ],
+    });
+  });
+
+  it('releases sleep during the outage and never re-asserts it', () => {
+    const released = steps.find((step) => step.minute > 600 && !step.sleeping);
+    assert.ok(released !== undefined, 'sleep never released');
+
+    const relatched = steps.filter((step) => step.minute > released.minute && step.sleeping);
+    assert.deepEqual(
+      relatched.map((step) => step.minute),
+      [],
+      'the cap came back during the day, with nobody asleep',
+    );
+  });
+
+  it('commands nothing while the unit is refusing writes', () => {
+    const duringOutage = commands(steps).filter((step) => step.minute >= 640 && step.minute <= 700);
+
+    assert.deepEqual(duringOutage, []);
+  });
+
+  it('resumes commanding once the unit comes back', () => {
+    const afterOutage = commands(steps).filter((step) => step.minute > 700);
+
+    assert.ok(afterOutage.length > 0, 'the loop never recovered from the outage');
+  });
+});
+
 describe('a restart mid-trace', () => {
   const falling = {
     startsAt: AT_1200,
@@ -277,17 +364,17 @@ describe('a restart mid-trace', () => {
     ],
   } as const;
 
-  it('waits out the dwell when nothing has restarted', () => {
-    const secondCommand = commands(runTrace(falling))[1];
+  it('waits out the dwell when nothing has restarted', async () => {
+    const secondCommand = commands(await runTrace(falling))[1];
 
     assert.equal(secondCommand?.minute, CONTROL.minDwellMinutes);
   });
 
-  it('acts on the next cycle after a restart, because the timer is in memory', () => {
+  it('acts on the next cycle after a restart, because the timer is in memory', async () => {
     // The documented consequence of dropping the control_state table: a restart
     // does not remember the dwell. Accepted — a service that crash-loops is a
     // thing to fix, not a thing to rate-limit.
-    const secondCommand = commands(runTrace({ ...falling, restartAtMinute: 2 }))[1];
+    const secondCommand = commands(await runTrace({ ...falling, restartAtMinute: 2 }))[1];
 
     assert.equal(secondCommand?.minute, 2);
   });

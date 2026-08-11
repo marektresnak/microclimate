@@ -413,7 +413,9 @@ src/
     freshness.ts        PURE. reading + now + per-source window -> RoomSignal
     policy.ts           PURE. snapshot -> desired Level + sleeping + reasons
     limiter.ts          PURE. decision + current + last-change -> ControlOutcome
-    loop.ts             orchestration: poll -> store -> decide -> actuate
+    loop.ts             orchestration: poll -> store -> decide -> actuate.
+                        Owns the only mutable state there is, and exposes the
+                        last decision through state() for /api/state.
   actuator/
     unit.ts             VentilationUnit interface
     modbus-tcp.ts       real implementation, FC3 + FC6        (not built yet)
@@ -724,11 +726,22 @@ The pure modules are written **test-first** — `freshness`, `precedence`, `poli
 Adapters are tested after, against fakes, because their shape is not knowable until the real
 protocol has been spoken.
 
-**Some tests are traces.** A hand-written series of `(minute, co2)` pairs plus a clock, fed to the
-real control modules, asserting on the *sequence* of commands rather than on one decision. No
-physics: it says "here is a CO₂ trace, here is what the controller does". That is what catches
-bugs which only exist across time — the cap releasing too early, a square wave, flutter at a step
-boundary — and it is about 30 lines of harness.
+**Some tests are traces.** A hand-written series of `(minute, co2)` pairs plus a clock, fed to
+**the real control loop** — through a real source, a real SQLite store and the recording fake unit
+— asserting on the *sequence* of commands rather than on one decision. No physics: it says "here
+is a CO₂ trace, here is what the service does". That is what catches bugs which only exist across
+time — the cap releasing too early, a square wave, flutter at a step boundary.
+
+**The harness drives `createControlLoop` rather than calling `policy` and `limiter` itself**, and
+that is not a detail. An earlier version threaded `currentLevel`, `lastChangeAt` and `wasSleeping`
+in the test file, which made it a second copy of the loop's state machine — one that stayed green
+while the real one was broken. The overnight trace exists to catch the 07:00 regression and did
+not notice when the loop stopped carrying `wasSleeping` at all. **Wiring that the tests
+re-implement is wiring that is not tested.**
+
+Driving the real loop also means the fake unit is right there, so a trace can make writes fail for
+an hour and see what the loop does across the outage. That is what pins the loop's update
+ordering, which nothing else can reach.
 
 **A closed-loop plant model is deliberately deferred**, not omitted. It would answer whether the
 loop converges, which a scripted trace structurally cannot. But every parameter it needs — airflow
