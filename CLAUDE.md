@@ -156,6 +156,12 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   stays good for the thing people actually reach for it at night. That is strictly better than the
   original design, which reasserted unconditionally and pushed a hand-set 30 back up to 50.
 
+  **This makes the hard requirement depend on the Modbus read.** A unit we cannot read is a unit
+  whose level we do not know, so a hand-set breach goes uncorrected for as long as reads are
+  failing — the loop logs each failure and enforces the cap again on the first tick that answers.
+  Correct by necessity rather than by choice, but it is a dependency the requirement did not have
+  before the cap started consulting the read-back, and it is worth knowing when reads get flaky.
+
   This is the third position this decision has occupied, and the reasoning for landing here is
   worth keeping. Reasserting *always* makes the panel useless, which two independent reviewers
   argued against. Reasserting *never* — briefly the design, for one round — means a hand-set 80 at

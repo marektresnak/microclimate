@@ -236,6 +236,42 @@ describe('the control loop', () => {
     store.close();
   });
 
+  it('cannot enforce the cap while the unit is unreadable, and resumes when it is', async () => {
+    // The cap against the wall panel is the only protection the hard requirement
+    // has, and it rests entirely on the read-back. A unit we cannot read is a
+    // unit whose level we do not know, so there is nothing to enforce against —
+    // correct by necessity, but it makes "not audible at night" depend on Modbus
+    // reads succeeding, which is worth stating out loud and worth a test.
+    const store = openReadingStore(':memory:');
+    const unit = createFakeUnit(20);
+    const log = recorder();
+    const loop = createControlLoop({
+      sources: [liveCo2Source('netatmo', 900).source],
+      store,
+      unit,
+      log: log.log,
+    });
+
+    await loop.tick(NIGHT);
+    assert.deepEqual(unit.commands, [40]);
+
+    unit.level = 80; // the wall panel, at 02:00
+    unit.failReads = true;
+    await loop.tick(NIGHT + 30_000);
+
+    assert.equal(unit.level, 80, 'nothing can be corrected while the level is unknown');
+    assert.deepEqual(unit.commands, [40]);
+    assert.match(log.lines.join('\n'), /could not read the unit/);
+
+    // And the moment the unit answers again, the breach is found and corrected.
+    unit.failReads = false;
+    await loop.tick(NIGHT + 60_000);
+
+    assert.equal(unit.level, CONTROL.sleepMaxLevel);
+    assert.deepEqual(unit.commands, [40, CONTROL.sleepMaxLevel]);
+    store.close();
+  });
+
   it('reports a hand-set level in the daytime without acting on it', async () => {
     // Outside the sleep cap there is no requirement to enforce, so the mismatch
     // is visible and left alone: the panel wins until the controller changes its
