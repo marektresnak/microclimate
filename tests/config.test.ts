@@ -74,6 +74,27 @@ describe('topology', () => {
     }
   });
 
+  it('never ranks a sensor that is out of service', () => {
+    // isActive is descriptive; the ranked lists decide who is consulted. This is
+    // what keeps the two from disagreeing — a decommissioned instrument left in
+    // one of the lists would keep winning for that kind, silently, and taking a
+    // sensor out means one edit per kind, which is exactly where a half-finished
+    // removal happens.
+    for (const [sensorId, sensor] of Object.entries(SENSORS)) {
+      if (sensor.isActive) continue;
+
+      for (const room of ROOM_IDS) {
+        for (const kind of MEASUREMENT_KINDS) {
+          const order = PRECEDENCE[room][kind] ?? [];
+          assert.ok(
+            !order.some((ranked) => ranked === sensorId),
+            `${sensorId} is out of service but is still ranked for ${room} ${kind}`,
+          );
+        }
+      }
+    }
+  });
+
   it('names each sensor at most once per kind', () => {
     for (const room of ROOM_IDS) {
       for (const kind of MEASUREMENT_KINDS) {

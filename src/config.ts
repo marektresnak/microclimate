@@ -7,8 +7,9 @@ import type { MeasurementKind } from './domain/measurement.ts';
 // reconciliation step that can drift.
 //
 // Two conventions keep that safe for historical data:
-//   1. Sensors are never deleted. Decommissioning sets isActive: false, so old
-//      readings stay interpretable.
+//   1. Sensors are never deleted. Decommissioning takes the sensor out of the
+//      precedence lists and sets isActive: false; the entry itself stays forever,
+//      so old readings stay interpretable.
 //   2. Relocating a sensor means a NEW sensor id. Editing the room of an existing
 //      id would retroactively relabel every reading it ever produced.
 
@@ -21,6 +22,14 @@ export type RoomId = (typeof ROOM_IDS)[number];
 export interface SensorConfig {
   readonly room: RoomId;
   readonly kinds: readonly MeasurementKind[];
+
+  // Descriptive, and reported by /api/sensors so a client can tell a retired
+  // instrument from a live one. It does *not* decide whether the instrument is
+  // consulted — the precedence lists below are the only thing that does.
+  //
+  // Two switches for one question is one too many, and this was the weaker of
+  // the two: the ranked list also says in what *order*, so it has to be edited
+  // anyway. A test asserts the two never disagree.
   readonly isActive: boolean;
   // Per-source, never global. This is load-bearing: one staleness window cannot
   // judge a 30-second-old Tado reading and a 6-minute-old Netatmo reading, and

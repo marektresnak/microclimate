@@ -349,7 +349,12 @@ CO₂ authority (~1070 ppm) exceeds the 700 ppm band. If it does fail, widen the
 - every source stale → returns `stale` carrying the **most recently measured** reading, even when
   that came from a lower-precedence source (Q3)
 - no source has ever reported → `missing`
-- a source is `isActive: false` → skipped, even if it is the freshest reading present
+- **decommissioning is a `config.ts` invariant, not a `precedence.ts` branch.** `resolveSignal`
+  consults exactly the ranked list and nothing else; `isActive` is descriptive and reported by
+  `/api/sensors`. Asserted where the mistake happens: an inactive sensor must not appear in any
+  ranked list. The earlier form — a skip inside `resolveSignal` — was unreachable from every
+  possible test, because no instrument in this flat has ever been decommissioned, and two switches
+  answering one question is one too many.
 - room has exactly one source → that one, trivially
 - kind not measured by any source in the room → `missing` (living-room CO₂ before the SEN66)
 - **two fresh sources are never averaged** — assert the returned value is exactly equal to one

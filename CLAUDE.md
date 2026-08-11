@@ -289,9 +289,22 @@ that can drift.
 
 Two conventions make that safe for historical data:
 
-1. **Sensors are never deleted from config.** Decommissioning sets `isActive: false`. The entry
-   stays forever so that old readings remain interpretable. Config describes the present; the
-   readings table is a record of the past, and the past needs its vocabulary kept.
+1. **Sensors are never deleted from config.** Decommissioning takes the sensor out of the
+   precedence lists and sets `isActive: false`. The entry stays forever so that old readings remain
+   interpretable. Config describes the present; the readings table is a record of the past, and the
+   past needs its vocabulary kept.
+
+   **The precedence lists are the only thing that decides who is consulted.** `isActive` is
+   descriptive — it is what `/api/sensors` reports so a client can tell a retired instrument from a
+   live one, and `precedence.ts` does not look at it. An earlier revision had it skip inactive
+   sources, which meant two switches answering one question and one of them unreachable from any
+   test, because nothing in this flat has ever been decommissioned. The ranked list also says in
+   what *order*, so it has to be edited anyway; the flag did not.
+
+   The cost is that taking a sensor out is one edit per kind rather than one per sensor, and a
+   half-finished removal would leave a retired instrument still winning for the kind that was
+   missed. That is a config inconsistency rather than a silent runtime one, and a test asserts an
+   inactive sensor is never ranked anywhere — so it fails at the moment the mistake is made.
 2. **Relocating a sensor means a new sensor id.** Move a SEN66 from the bedroom to the kids' room
    and you retire `bedroom_sen66` and add `kids_sen66` — same device, two identities. Editing the
    room of an existing id would retroactively relabel every historical reading. This is the one

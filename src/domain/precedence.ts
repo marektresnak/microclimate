@@ -11,6 +11,10 @@ import type { RoomSignal } from './signal.ts';
  * two consumers: the dashboard therefore always shows what the controller is
  * actually seeing, and the two disagreeing is impossible by construction rather
  * than by discipline.
+ *
+ * The ranked list is the whole of who gets consulted. Decommissioning an
+ * instrument means taking it out of those lists — there is deliberately no
+ * second switch here that could disagree with them.
  */
 export function resolveSignal(
   room: RoomId,
@@ -26,10 +30,6 @@ export function resolveSignal(
 
   for (const sourceId of ranked) {
     const sensor = SENSORS[sourceId];
-    // Decommissioned instruments stay in config forever so that historical
-    // readings remain interpretable. They are simply never consulted again.
-    if (!sensor.isActive) continue;
-
     const latest = newestReadingFrom(readings, sourceId, kind);
     const signal = toRoomSignal(latest, now, sensor.freshnessWindowMs);
 
