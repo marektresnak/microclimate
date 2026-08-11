@@ -12,6 +12,7 @@ const OPTIONS: ModbusUnitOptions = {
   unitId: 1,
   timeoutMs: 5,
   retries: 0,
+  retryPauseMs: 0,
 };
 
 interface FakeStream {

@@ -114,6 +114,13 @@ Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push l
 - **Netatmo Home Coach** — pull, OAuth refresh flow, `gethomecoachsdata`. Temperature, humidity,
   CO₂. Reference: `~/dev/netatmo-sync/src/worker.js` (mine, working). **Netatmo only refreshes
   every 7–8 minutes on their side.** Polling it faster gains nothing.
+
+  `~/RiderProjects/DaphneControl` has files under `Sensors/Netatmo/`, and they are **stubs** —
+  every method throws `NotImplementedException`. There is no auth flow, no endpoint and no response
+  shape to recover there, so `netatmo-sync` is the only reference. Its one real contribution is a
+  comment on `ISensor`: *"if the bedroom CO2 is over some threshold, we can assume someone is
+  sleeping and restrict max fan speed to 50%"* — which is where `SLEEP_CO2` and `sleepMaxLevel`
+  came from, already absorbed above.
 - **SEN66** — Sensirion nine-in-one node (PM1, PM2.5, PM4, PM10, temperature, humidity, VOC
   index, NOx index, CO₂) over I²C behind an ESP32, pushing JSON to us. Not built yet; the
   ingest endpoint and a simulator script stand in.
@@ -174,7 +181,7 @@ and `~/RiderProjects/DaphneControl` (both proven against the real unit):
 | Value encoding | percent × 10 — `400` means 40% |
 | Set | FC6, write single register |
 | Read back | FC3, read holding registers — **confirmed working** |
-| Timeouts used | 5 s, 3 retries |
+| Timeouts used | 5 s, 3 retries, 250 ms between attempts |
 
 **The register is 21001, not the 21002 the documentation gives.** This is the usual Modbus
 convention clash — documentation numbers registers from 1, the wire numbers them from 0. It is
@@ -184,6 +191,18 @@ not a bug and must not be "corrected". Put this in a comment at the call site.
 on 2026-08-11 it read 50%, wrote 70%, read back 70%, wrote 50% and read back 50%, first attempt.
 Every recovered detail above therefore now holds for this code and not just for the C# spikes —
 framing, transaction ids, the register number and the ×10 encoding.
+
+**The 5 seconds covers connecting, not only waiting for an answer.** The old spike set
+`ReceiveTimeout` and `SendTimeout`, both of which govern an already-established stream, and left
+`TcpClient.Connect` unbounded — so the recovered "5 s" never covered connection setup in either
+codebase. An address that stops answering SYNs then blocks for the operating system's default,
+about 75 seconds per attempt, which with retries is minutes against a thirty-second control cycle.
+Confirmed by deleting the connect timeout and watching a test take exactly 75 seconds.
+
+**250 ms between attempts** is not invented either: NModbus, which the spike used, waited that long
+by default, so it is what the field-proven behaviour actually included. Reconnecting the instant a
+device refuses you is the least likely attempt to succeed, and four of them inside a millisecond is
+one attempt wearing a disguise.
 
 Because FC3 reads back successfully, **the current level is observable**. `/api/state` reports
 desired and actual separately, and a mismatch means someone used the wall panel.
@@ -854,11 +873,27 @@ already asserted; see the control logic for why it may not assert one on its own
 
 These are unresolved. Do not invent answers — ask.
 
-1. **The rest of the Daphne register map.** Fan speed (21001) is confirmed. The old spike carries
-   two contradictory comments — one says register 21002 is fan speed, another says it is
-   temperature — and a stray note about register 14000 using "direct addressing" on
-   Daphne/AirGENIO. Only 21001 is trusted. Anything else must be verified against the real 2VV
-   documentation or probed against the unit before use.
+1. **The rest of the Daphne register map.** Fan speed at wire 21001 is confirmed twice over — by
+   the spikes and by this client driving the real unit.
+
+   The "contradiction" in the old comments is softer than it looked, having now read them properly.
+   The block is `// This is always -1 against documentation. / 21002 = fan speed (400 = 40 %) /
+   21002 = temperature`. The first two lines agree: "21002 = fan speed" is *documentation*
+   numbering, which the −1 rule turns into wire 21001 — exactly what the code writes and what
+   works. Only the third line is odd, and it reads either as a typo for 21003 or as a switch to
+   wire numbering. **Both readings collapse to the same physical claim: the register immediately
+   after fan speed is temperature.** That is inference from a comment, not evidence from code —
+   no spike ever reads any register but 21001.
+
+   **One FC3 read of wire 21002 settles it.** A value near 200–250 means temperature at ×10; a
+   value tracking the fan level means the note was wrong.
+
+   **Register 14000 remains pure hearsay.** It appears in a comment, in no code, attached to
+   nothing that was ever probed, and its claim of "direct addressing" contradicts the word
+   "always" two lines above it. The offset machinery those comments discuss was never even
+   implemented — the spike assigns `modbusAddress = register` and prints them as equal. Treat the
+   comments as research notes rather than findings: **no global −1 rule may be assumed**, and every
+   new register gets probed individually — read both N and N−1 and see which answers sensibly.
 2. **Does the unit accept only multiples of 10, or does it round?** We only ever write valid
    `Level` values, so this is a curiosity rather than a risk — but worth knowing when reading
    back a level the wall panel set.

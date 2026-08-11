@@ -16,6 +16,8 @@ import { openReadingStore } from './store/readings.ts';
 // thirty-second evaluation interval.
 const MODBUS_TIMEOUT_MS = 5_000;
 const MODBUS_RETRIES = 3;
+// What NModbus paused by default, so it is what the old spike was proven with.
+const MODBUS_RETRY_PAUSE_MS = 250;
 
 const databasePath = process.env.DATABASE_PATH ?? './data/home.db';
 mkdirSync(dirname(databasePath), { recursive: true });
@@ -35,6 +37,7 @@ function chooseUnit(): VentilationUnit {
     unitId: Number(process.env.HRV_MODBUS_UNIT_ID ?? 1),
     timeoutMs: MODBUS_TIMEOUT_MS,
     retries: MODBUS_RETRIES,
+    retryPauseMs: MODBUS_RETRY_PAUSE_MS,
   });
 }
 

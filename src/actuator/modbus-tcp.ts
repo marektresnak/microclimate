@@ -40,14 +40,19 @@ export interface ByteStream {
   close(): void;
 }
 
-export type OpenStream = (host: string, port: number) => Promise<ByteStream>;
+export type OpenStream = (host: string, port: number, timeoutMs: number) => Promise<ByteStream>;
 
 export interface ModbusUnitOptions {
   readonly host: string;
   readonly port: number;
   readonly unitId: number;
+  /** Covers connecting as well as waiting for the answer — see `openTcpStream`. */
   readonly timeoutMs: number;
   readonly retries: number;
+  /** Between attempts. Reconnecting the instant a device refused you is the
+   * least likely attempt to succeed, and four of those inside a millisecond is
+   * one attempt wearing a disguise. */
+  readonly retryPauseMs: number;
 }
 
 export function createModbusUnit(
@@ -67,7 +72,7 @@ export function createModbusUnit(
     // A fresh connection per request. At two requests every thirty seconds a
     // persistent socket is state to manage — stale connections, reconnection,
     // half-open detection — bought with nothing.
-    const stream = await openStream(options.host, options.port);
+    const stream = await openStream(options.host, options.port, options.timeoutMs);
     try {
       return await sendAndWait(stream, request, options.timeoutMs);
     } finally {
@@ -85,8 +90,9 @@ export function createModbusUnit(
         response = await exchange(request);
       } catch (error) {
         // Network trouble: a refused connection, a timeout, a dropped socket.
-        // Worth another go.
+        // Worth another go, after a pause.
         lastFailure = error instanceof Error ? error : new Error(String(error));
+        if (attempt < options.retries) await pause(options.retryPauseMs);
         continue;
       }
 
@@ -263,18 +269,37 @@ function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
   return joined;
 }
 
-function openTcpStream(host: string, port: number): Promise<ByteStream> {
+function pause(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function openTcpStream(host: string, port: number, timeoutMs: number): Promise<ByteStream> {
   return new Promise((resolve, reject) => {
     const socket = connect({ host, port });
+
+    // Connecting has to sit inside the same budget as waiting for the answer.
+    // Left to the operating system, an address that has stopped answering SYNs
+    // blocks for over a minute per attempt — which with retries is minutes,
+    // against a thirty-second control cycle.
+    socket.setTimeout(timeoutMs, () => {
+      socket.destroy(new Error(`no connection to ${host}:${port} within ${timeoutMs} ms`));
+    });
 
     socket.once('error', reject);
     socket.once('connect', () => {
       socket.removeListener('error', reject);
+      socket.setTimeout(0); // the exchange keeps its own clock from here
+
       resolve({
         send: (bytes) => void socket.write(bytes),
         listen: (onChunk, onError) => {
           socket.on('data', onChunk);
           socket.on('error', onError);
+          // A unit that accepts the connection and then closes it without
+          // answering produces no data and no error, so without this the
+          // exchange waits out its whole timeout for a socket already gone.
+          // Small embedded stacks shed load exactly this way.
+          socket.on('close', () => onError(new Error('the unit closed the connection')));
         },
         close: () => void socket.destroy(),
       });
