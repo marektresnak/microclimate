@@ -72,9 +72,21 @@ export function createModbusUnit(
     // A fresh connection per request. At two requests every thirty seconds a
     // persistent socket is state to manage — stale connections, reconnection,
     // half-open detection — bought with nothing.
+    //
+    // `timeoutMs` is the budget for the whole attempt, not for each half of it.
+    // Spending a full timeout on connecting and then another on waiting makes a
+    // "five second" attempt take ten, and enough of those overrun the thirty
+    // second cycle they are supposed to fit inside.
+    const startedAt = performance.now();
     const stream = await openStream(options.host, options.port, options.timeoutMs);
+
     try {
-      return await sendAndWait(stream, request, options.timeoutMs);
+      const remaining = options.timeoutMs - (performance.now() - startedAt);
+      if (remaining <= 0) {
+        throw new Error(`connecting to ${options.host} used the whole ${options.timeoutMs} ms`);
+      }
+
+      return await sendAndWait(stream, request, remaining);
     } finally {
       stream.close();
     }
@@ -113,9 +125,8 @@ export function createModbusUnit(
       ]);
 
       const body = await ask(request, READ_HOLDING_REGISTERS);
-      const byteCount = body[0];
-      if (byteCount !== 2) {
-        throw new Error(`expected one register back, the unit sent ${String(byteCount)} bytes`);
+      if (body.length < 3 || body[0] !== 2) {
+        throw new Error(`expected one register back, the unit sent a ${body.length}-byte body`);
       }
 
       const raw = fromBigEndian(body, 1);
@@ -186,6 +197,14 @@ function readAnswer(
   if (answered !== asked) {
     throw new Error(`answer to transaction ${answered}, but we asked ${asked}`);
   }
+
+  // The one header field that carried no check. It is always zero over TCP, so
+  // anything else means this is not a Modbus TCP frame at all.
+  const protocol = fromBigEndian(response, 2);
+  if (protocol !== 0) {
+    throw new Error(`answer carries protocol id ${protocol}, but Modbus TCP is always 0`);
+  }
+
   if (response[6] !== unitId) {
     throw new Error(`answer from unit ${String(response[6])}, but we asked unit ${unitId}`);
   }
@@ -216,7 +235,7 @@ function sendAndWait(
     let received: Uint8Array = new Uint8Array(0);
 
     const timer = setTimeout(() => {
-      reject(new Error(`the unit did not answer within ${timeoutMs} ms`));
+      reject(new Error(`the unit did not answer within ${Math.round(timeoutMs)} ms`));
     }, timeoutMs);
 
     stream.listen(
@@ -277,18 +296,27 @@ function openTcpStream(host: string, port: number, timeoutMs: number): Promise<B
   return new Promise((resolve, reject) => {
     const socket = connect({ host, port });
 
-    // Connecting has to sit inside the same budget as waiting for the answer.
-    // Left to the operating system, an address that has stopped answering SYNs
-    // blocks for over a minute per attempt — which with retries is minutes,
-    // against a thirty-second control cycle.
-    socket.setTimeout(timeoutMs, () => {
+    // Connecting has to sit inside the budget. Left to the operating system, an
+    // address that has stopped answering SYNs blocks for over a minute per
+    // attempt, against a thirty-second control cycle.
+    //
+    // An explicit timer rather than `socket.setTimeout`, which reads zero as "no
+    // timeout at all" — so a misconfigured budget would hang here forever rather
+    // than failing immediately, which is the failure this exists to prevent.
+    const connectTimer = setTimeout(() => {
       socket.destroy(new Error(`no connection to ${host}:${port} within ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    // Deliberately left attached after the promise settles. Rejecting a settled
+    // promise is a no-op, and it means the socket is never for one instant
+    // without an error listener — which is what Node turns into a crash.
+    socket.once('error', (error) => {
+      clearTimeout(connectTimer);
+      reject(error);
     });
 
-    socket.once('error', reject);
     socket.once('connect', () => {
-      socket.removeListener('error', reject);
-      socket.setTimeout(0); // the exchange keeps its own clock from here
+      clearTimeout(connectTimer);
 
       resolve({
         send: (bytes) => void socket.write(bytes),
@@ -299,6 +327,9 @@ function openTcpStream(host: string, port: number, timeoutMs: number): Promise<B
           // answering produces no data and no error, so without this the
           // exchange waits out its whole timeout for a socket already gone.
           // Small embedded stacks shed load exactly this way.
+          //
+          // This also fires on our own `close()` after a successful exchange,
+          // where rejecting a settled promise does nothing.
           socket.on('close', () => onError(new Error('the unit closed the connection')));
         },
         close: () => void socket.destroy(),

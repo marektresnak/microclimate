@@ -11,11 +11,16 @@ import { openReadingStore } from './store/readings.ts';
 
 // Wiring only. Every decision this file causes is made somewhere else.
 
-// Both proven against the real unit by the earlier C# spikes. Four attempts at
-// five seconds is twenty seconds in the worst case, comfortably inside the
-// thirty-second evaluation interval.
+// The five seconds is the spike's, and covers connecting as well as answering.
+//
+// The retries are not the spike's three, because the spike was a one-shot HTTP
+// handler and this is a loop: another attempt comes along in thirty seconds
+// regardless, so a blip costs one late fan movement rather than a lost one.
+// Two attempts also keeps an unreachable unit from stalling the sensor polling
+// that shares the tick — the worst case is 2 × 5 s + one pause per operation,
+// and a tick makes at most two operations, which fits inside the interval.
 const MODBUS_TIMEOUT_MS = 5_000;
-const MODBUS_RETRIES = 3;
+const MODBUS_RETRIES = 1;
 // What NModbus paused by default, so it is what the old spike was proven with.
 const MODBUS_RETRY_PAUSE_MS = 250;
 

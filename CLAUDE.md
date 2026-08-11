@@ -199,6 +199,17 @@ codebase. An address that stops answering SYNs then blocks for the operating sys
 about 75 seconds per attempt, which with retries is minutes against a thirty-second control cycle.
 Confirmed by deleting the connect timeout and watching a test take exactly 75 seconds.
 
+**A fresh TCP connection per request**, rather than holding one open. At two requests every thirty
+seconds a persistent socket is state to manage — stale connections, reconnection, half-open
+detection — bought with nothing. The risk was that a cheap embedded stack accepts only one session
+and holds a dead one open; measured instead of assumed, on 2026-08-11: ten consecutive fresh
+connections completed in 6–11 ms each with no refusals, which is about a hundred times the rate
+this will ever run at.
+
+**The five seconds is one budget per attempt, not one per phase.** Connecting spends from the same
+clock as waiting for the answer, so an attempt cannot quietly cost double — which matters because
+a tick makes up to two of these and has thirty seconds to do it in.
+
 **250 ms between attempts** is not invented either: NModbus, which the spike used, waited that long
 by default, so it is what the field-proven behaviour actually included. Reconnecting the instant a
 device refuses you is the least likely attempt to succeed, and four of them inside a millisecond is
