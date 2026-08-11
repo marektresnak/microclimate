@@ -82,6 +82,13 @@ export const SENSORS = {
 
 export type SensorId = keyof typeof SENSORS;
 
+// The runtime companion of SensorId, for the places that must iterate every
+// sensor once the types are stripped. `Object.keys` forgets literal key types
+// by design (an object may carry extra keys at runtime); this one cannot,
+// because SENSORS is the closed `as const` object the type was derived from —
+// the assertion restates a fact the compiler just proved.
+export const SENSOR_IDS = Object.keys(SENSORS) as readonly SensorId[];
+
 /**
  * Ordered per (room, kind): the first *fresh* source wins, and two sources are
  * never averaged. Trust is what an order encodes, and it only matters while
