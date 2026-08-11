@@ -21,11 +21,16 @@ interface FakeStream {
 
 /**
  * Answers each request with whatever `reply` returns — one entry per chunk, so a
- * frame can be delivered split in half, or not at all.
+ * frame can be delivered split in half, or not at all. `thenFails` drops the
+ * connection once those chunks have been delivered.
  */
-function fakeStreams(reply: (request: Uint8Array) => readonly Uint8Array[]): FakeStream {
+function fakeStreams(
+  reply: (request: Uint8Array) => readonly Uint8Array[],
+  thenFails?: Error,
+): FakeStream {
   const sent: Uint8Array[] = [];
   let onChunk: (chunk: Uint8Array) => void = () => undefined;
+  let onError: (error: Error) => void = () => undefined;
 
   const stream: ByteStream = {
     send(bytes) {
@@ -34,10 +39,12 @@ function fakeStreams(reply: (request: Uint8Array) => readonly Uint8Array[]): Fak
       // Asynchronously, because a socket never answers inside write().
       queueMicrotask(() => {
         for (const chunk of chunks) onChunk(chunk);
+        if (thenFails !== undefined) onError(thenFails);
       });
     },
-    listen(chunkHandler) {
+    listen(chunkHandler, errorHandler) {
       onChunk = chunkHandler;
+      onError = errorHandler;
     },
     close() {
       // A fresh connection per request, so this fires once per exchange.
@@ -177,6 +184,26 @@ describe('the wire', () => {
     ]);
 
     await assert.rejects(unitOver(fake).set(50), /answer to transaction 9, but we asked 1/);
+  });
+
+  it('does not accept an answer to a different function code', async () => {
+    // A perfectly well-formed FC3 answer to an FC6 request means something else
+    // is talking on this connection. Reading its first four bytes as a register
+    // echo would turn someone else's data into our confirmation.
+    const fake = fakeStreams(() => [
+      frame(0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x01, 0x03, 0x02, 0x01, 0xf4),
+    ]);
+
+    await assert.rejects(unitOver(fake).set(50), /answered function 3, but we asked 6/);
+  });
+
+  it('gives up when the socket dies mid-frame rather than waiting out the timeout', async () => {
+    // Half a frame arrives and the connection drops — a flaky wifi bridge, not a
+    // slow unit. Sitting out the full five seconds for a socket that is already
+    // gone delays every retry queued behind it.
+    const fake = fakeStreams((request) => [request.slice(0, 5)], new Error('read ECONNRESET'));
+
+    await assert.rejects(unitOver(fake).set(50), /ECONNRESET/);
   });
 
   it('surfaces a Modbus exception instead of swallowing it', async () => {
