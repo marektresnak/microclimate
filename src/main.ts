@@ -5,36 +5,58 @@ import { createFakeUnit } from './actuator/fake.ts';
 import { createModbusUnit } from './actuator/modbus-tcp.ts';
 import type { VentilationUnit } from './actuator/unit.ts';
 import { CONTROL } from './config.ts';
-import { createControlLoop } from './control/loop.ts';
+import { createApiServer } from './http/server.ts';
+import type { NetatmoAuthOptions } from './http/server.ts';
+import { createCollector } from './sources/collector.ts';
+import { createNetatmoSource } from './sources/netatmo.ts';
+import type { SensorSource } from './sources/source.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from './sources/synthetic.ts';
 import { openReadingStore } from './store/readings.ts';
 
 // Wiring only. Every decision this file causes is made somewhere else.
+//
+// The control loop is deliberately NOT wired. It is built and tested —
+// src/control/, and the scripted traces that drive it — and parked: the band
+// cannot be validated before a stretch of real readings exists, so for now the
+// service collects and the fan is driven by hand, over the wall panel or POST
+// /api/unit/level. The collector below is the loop's polling step extracted;
+// when the loop returns it replaces the collector here, never runs beside it.
+// See CLAUDE.md, "The control loop is parked".
 
 // The five seconds is the spike's, and covers connecting as well as answering.
-//
-// The retries are not the spike's three, because the spike was a one-shot HTTP
-// handler and this is a loop: another attempt comes along in thirty seconds
-// regardless, so a blip costs one late fan movement rather than a lost one.
-// Two attempts also keeps an unreachable unit from stalling the sensor polling
-// that shares the tick — the worst case is 2 × 5 s + one pause per operation,
-// and a tick makes at most two operations, which fits inside the interval.
+// One retry, because the collector comes back around in thirty seconds anyway.
 const MODBUS_TIMEOUT_MS = 5_000;
 const MODBUS_RETRIES = 1;
 // What NModbus paused by default, so it is what the old spike was proven with.
 const MODBUS_RETRY_PAUSE_MS = 250;
 
+// How often sources are OFFERED a poll, not how often they are polled — each
+// carries its own cadence and mostly declines. Thirty seconds keeps a
+// one-minute source honest without busy-waiting.
+const COLLECT_TICK_MS = 30_000;
+
+// Empty and unset behave the same everywhere: an empty string in .env is a
+// placeholder, not a value.
+function envOrUndefined(name: string): string | undefined {
+  const value = process.env[name];
+  return value === undefined || value === '' ? undefined : value;
+}
+
+const log = (line: string): void => console.log(`${new Date().toISOString()}  ${line}`);
+
 const databasePath = process.env.DATABASE_PATH ?? './data/home.db';
 mkdirSync(dirname(databasePath), { recursive: true });
-
 const store = openReadingStore(databasePath);
 
+const port = Number(process.env.PORT ?? 3000);
+const netatmoTokenPath = process.env.NETATMO_TOKEN_PATH ?? './data/netatmo-token.json';
+
 // With no HRV_MODBUS_HOST there is no unit to talk to, so the recording fake
-// stands in: it accepts a level, reports it back, and refuses anything above the
-// ceiling. `npm start` then demonstrates the whole loop on any machine.
+// stands in: it accepts a level, reports it back, and refuses anything above
+// the ceiling. `npm start` then demonstrates the whole service on any machine.
 function chooseUnit(): VentilationUnit {
-  const host = process.env.HRV_MODBUS_HOST;
-  if (host === undefined || host === '') return createFakeUnit(CONTROL.safeDefaultLevel);
+  const host = envOrUndefined('HRV_MODBUS_HOST');
+  if (host === undefined) return createFakeUnit(CONTROL.safeDefaultLevel);
 
   return createModbusUnit({
     host,
@@ -46,26 +68,62 @@ function chooseUnit(): VentilationUnit {
   });
 }
 
-const unit = chooseUnit();
-const unitDescription = process.env.HRV_MODBUS_HOST ?? 'a fake unit (no HRV_MODBUS_HOST set)';
+const netatmoClientId = envOrUndefined('NETATMO_CLIENT_ID');
+const netatmoClientSecret = envOrUndefined('NETATMO_CLIENT_SECRET');
 
-const loop = createControlLoop({
-  sources: [createSyntheticNetatmo(), createSyntheticTado()],
+const netatmoAuth: NetatmoAuthOptions | undefined =
+  netatmoClientId !== undefined && netatmoClientSecret !== undefined
+    ? {
+        clientId: netatmoClientId,
+        clientSecret: netatmoClientSecret,
+        redirectUri:
+          process.env.NETATMO_REDIRECT_URI ?? `http://localhost:${port}/auth/netatmo/callback`,
+        tokenPath: netatmoTokenPath,
+      }
+    : undefined;
+
+// Real credentials mean ONLY real sources. The synthetic Netatmo writes under
+// the same source_id as the real one, so mixing them would salt the database
+// with invented readings — and the week of logged settling points the band
+// recomputation waits for has to be real or it is worthless.
+function chooseSources(): readonly SensorSource[] {
+  if (netatmoAuth === undefined) return [createSyntheticNetatmo(), createSyntheticTado()];
+
+  return [
+    createNetatmoSource({
+      clientId: netatmoAuth.clientId,
+      clientSecret: netatmoAuth.clientSecret,
+      deviceId: envOrUndefined('NETATMO_DEVICE_ID'),
+      sourceId: 'bedroom_netatmo',
+      tokenPath: netatmoTokenPath,
+      seedRefreshToken: envOrUndefined('NETATMO_REFRESH_TOKEN'),
+      log,
+    }),
+  ];
+}
+
+const unit = chooseUnit();
+const sources = chooseSources();
+const collector = createCollector({ sources, store, log });
+
+const server = createApiServer({
   store,
   unit,
-  // The loop says what happened; how it is rendered is wiring, which is why the
-  // timestamp is stamped here rather than inside the decision.
-  log: (line) => console.log(`${new Date().toISOString()}  ${line}`),
+  netatmoAuth,
+  clock: Date.now,
+  log,
 });
+server.listen(port);
 
+const unitDescription = envOrUndefined('HRV_MODBUS_HOST') ?? 'a fake unit (no HRV_MODBUS_HOST set)';
 console.log(
-  `microclimate — deciding every ${CONTROL.evaluationIntervalMs / 1000}s, ` +
-    `synthetic sensors, driving ${unitDescription}, storing to ${databasePath}`,
+  `microclimate — collecting from ${sources.map((source) => source.name).join(', ')}, ` +
+    `serving http on :${port}, driving ${unitDescription} by hand only, storing to ${databasePath}`,
 );
 
-// Sequential rather than an interval, so a slow tick delays the next one instead
-// of overlapping with it.
+// Sequential rather than an interval, so a slow tick delays the next one
+// instead of overlapping with it.
 for (;;) {
-  await loop.tick(Date.now());
-  await new Promise((resolve) => setTimeout(resolve, CONTROL.evaluationIntervalMs));
+  await collector.tick(Date.now());
+  await new Promise((resolve) => setTimeout(resolve, COLLECT_TICK_MS));
 }

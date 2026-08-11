@@ -40,6 +40,8 @@ responds at once rather than waiting out a dwell period.
 **Q6 — Is a bad reading in a batch fatal to the whole batch?**
 *Recommendation: no. Store the valid readings, report the rejected ones with reasons. One
 misconfigured measurement should not discard eight good ones.*
+*Decided with the module, 2026-08-11: as recommended — and the response is 200 whenever the
+batch was processed, verdicts inside, so a simple node never retries poison.*
 
 ### From the independent review
 
@@ -540,11 +542,16 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
   intact; `INSERT OR IGNORE` already makes replay idempotent at any age, so a past-side window
   would discard real data for no benefit.
 - a buffered backlog replay is stored with original `measured_at` and *now* as `received_at`
-- one invalid reading in a batch → **Q6**
+- one invalid reading in a batch → the rest lands; the reject carries its index and reason
+  (Q6, decided as recommended)
 - unknown `source_id` (not in config) → rejected
-- unknown `kind` → rejected
+- unknown `kind` → rejected; so is a real kind the named instrument does not declare — a
+  mislabelled reading files one instrument's data under another's name, permanently
 - wrong value type → rejected before it reaches SQLite, not by the STRICT table throwing
-- missing or wrong ingest token → 401
+- a CO₂ reading below 300 ppm is stored and flagged in the log — probable calibration drift,
+  and the reading is the evidence
+- ~~missing or wrong ingest token → 401~~ *removed 2026-08-11: ingest is open on the LAN like
+  every other endpoint — the acceptance is recorded in CLAUDE.md*
 
 ## `store/readings.ts`
 
@@ -616,6 +623,21 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - **the below-300-ppm calibration check is deferred with the ingest endpoint**, where readings
   arrive. Recorded here so its absence reads as a decision.
 
+## `sources/collector.ts`
+
+*Added when the loop was parked (2026-08-11): the loop's polling step, extracted so collection
+runs without control. The loop's own copy of these behaviours keeps its tests; the loop and the
+collector are alternatives in `main.ts`, never concurrent.*
+
+- polls a due source and stores what it returns
+- respects each source's own cadence rather than polling on every tick
+- asks again once the interval has elapsed
+- one source throwing does not stop the others (same case as the loop's)
+- a store that cannot be written does not kill the tick, and the log names the store, not the
+  vendor
+- a repeated reading logs as "0 new" — the dedup constraint absorbing Netatmo's refresh window,
+  visible in the log
+
 ## `http/server.ts`
 
 - `/api/state` returns room-level values, each naming its source and freshness
@@ -625,6 +647,20 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - `/api/sensors` includes inactive sensors, so historical data stays interpretable
 - room history expands to the configured sources for that room
 - `/health`
+
+*Built 2026-08-11, with the loop parked. The control block of `/api/state` is parked with it;
+what was added instead:*
+
+- unknown rooms, sensors, kinds, timestamps, routes and methods are each refused with the right
+  status
+- `GET /api/unit/level` reads the fan live, and answers 502 when the unit does not
+- `POST /api/unit/level` refuses 90 and 100 through `assertCommandedLevel`, and answers 502 when
+  the write fails. *The token cases were removed the same day they were written: the endpoint is
+  deliberately unauthenticated on the trusted LAN, reversing the earlier finding — the
+  acceptance and its bounds are recorded in CLAUDE.md, "The write endpoint is open on the LAN".*
+- `/auth/netatmo` issues a single-use `state` and keeps the client secret out of the browser URL
+- the callback rejects a forged state, an expired state (10 min), and a vendor refusal; a good
+  code is exchanged and the refresh token lands in the token file
 
 ---
 

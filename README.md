@@ -5,11 +5,17 @@ ventilation) unit based on air quality — primarily CO₂.
 
 > **Status.** The control core is built and tested — config and domain types, freshness,
 > precedence, the policy, the limiter, the store, the loop, a scripted-trace suite — as is the
-> Modbus TCP client that drives the hardware. The vendor adapters (Tado, Netatmo), the ingest
-> endpoint and the read API are not built; see [Not built yet](#not-built-yet).
+> Modbus TCP client, the Netatmo adapter with its OAuth onboarding, and the JSON read API.
 >
-> `npm start` runs the whole loop against synthetic sensors and a recording fake unit. Set
-> `HRV_MODBUS_HOST` and it drives the real one instead.
+> **The control loop is deliberately not wired.** The band it would control with is an estimate
+> until a week of real readings exists, so for now the service *collects* — sensors → store →
+> API — and the fan is driven by hand: the wall panel, or `POST /api/unit/level`. The reasoning,
+> what that suspends, and the plan for the control code are in `CLAUDE.md`, "The control loop is
+> parked". The Tado adapter is not built; see [Not built yet](#not-built-yet).
+>
+> `npm start` collects from synthetic sensors into a real store, serves the API, and lets you
+> drive a recording fake unit. Set `HRV_MODBUS_HOST` to drive the real one, and the Netatmo
+> credentials to poll the real Home Coach instead of the synthetics.
 
 ## The problem
 
@@ -108,8 +114,19 @@ dependencies at all.
 
 ```sh
 npm install
-npm start                             # synthetic sensors, fake unit, logs every decision
-HRV_MODBUS_HOST=192.168.0.65 npm start  # …driving the real HRV unit over Modbus TCP
+npm start                             # synthetic sensors, fake unit, API on :3000
+HRV_MODBUS_HOST=192.168.0.65 npm start  # …with the real HRV unit behind the API
+```
+
+`npm start` loads `.env` if one exists (`--env-file-if-exists`); variables already exported in
+the shell win over the file.
+
+```sh
+curl localhost:3000/api/state                       # what every room currently says
+curl localhost:3000/api/unit/level                  # where the fan actually is
+curl -X POST localhost:3000/api/unit/level \
+  -H 'content-type: application/json' -d '{"level":50}'
+open http://localhost:3000/auth/netatmo             # one-time Netatmo authorisation
 ```
 
 ```sh
@@ -124,23 +141,16 @@ the air. A suite that runs green without a typecheck would not notice the guard 
 
 ## Not built yet
 
-Interfaces and fakes stand in for all of these; none of them changes the control core.
+Interfaces and fakes stand in for these; none of them changes the control core.
 
-- **Tado and Netatmo adapters.** `SensorSource` is the seam; `sources/synthetic.ts` stands in.
-- **`POST /api/readings`** and the JSON read API. The seams are in place: `resolveSignal` is the
-  same function the controller uses, so `/api/state` cannot disagree with it, and the loop already
-  exposes its last decision — level held, level the unit reports, demand before the cap, reasons —
-  through `state()`.
-- **The below-300-ppm calibration check.** A reading under 300 ppm means an NDIR sensor's
-  self-calibration has drifted, which silently shifts the whole band. It is a check on readings as
-  they arrive, so it belongs with the ingest endpoint rather than in the control loop. The other
-  diagnostic — pinned at the ceiling — is built, because that one is about the decision.
+- **The Tado adapter.** `SensorSource` is the seam; `sources/synthetic.ts` stands in.
 
 ## Deliberately out of scope
 
-Docker, any UI or charting, control of the Tado heating (read-only to us), authentication beyond a
-shared token on the ingest endpoint, and retention/downsampling — the rollup tier is designed and
-costed in `CLAUDE.md` but not built, and until it exists **nothing prunes**.
+Docker, any UI or charting, control of the Tado heating (read-only to us), authentication —
+every endpoint is open on the trusted LAN, a recorded acceptance in `CLAUDE.md` — and
+retention/downsampling — the rollup tier is designed and costed in `CLAUDE.md` but not built,
+and until it exists **nothing prunes**.
 
 Sensor topology lives in config rather than the database, on purpose: it gives literal union types
 for room and sensor ids, so a typo is a compile error, and git records *why* a sensor moved in a

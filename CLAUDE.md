@@ -17,6 +17,41 @@ it cold, it is the wrong change.
 
 ---
 
+## The control loop is parked — the service collects, a human drives
+
+**As of 2026-08-11 the loop is not wired.** `main.ts` runs collection (sources → store), the
+read API, and one write endpoint. Nothing automatic moves the fan; it is driven by
+the wall panel or by `POST /api/unit/level`. The control code — `src/control/`, the scripted
+traces — stays in the tree and green in CI: built and tested, deliberately unwired.
+
+**Why.** The band is an estimate until a week of real settling points exists (see "What is
+actually known about this flat"), and convergence cannot be validated before that data does.
+Rather than let a controller tuned by guesses drive the flat, the automation waits for its
+calibration data — and manual control over the API is the instrument of that campaign: hold a
+level, watch CO₂ settle, log it. The loop comes back with a band computed from measurement.
+
+**What is suspended while it is parked, said out loud:**
+
+- **The hard requirement is suspended.** Nothing corrects a fan left loud while someone is
+  asleep — a hand-set 80 at 23:30 runs all night. This returns the flat to its actual status
+  quo (wall panel plus human memory); the service adds observability, not yet protection. There
+  is deliberately **no quiet-hours check on the POST endpoint**: the wall panel would bypass it
+  anyway, and partial cover that reads as protection is worse than a known gap (R8's words).
+- The pinned-at-ceiling diagnostic, the startup adoption of the unit's level (Q4), and the
+  sleep logic run only in tests.
+- `/api/state` carries no control block. It returns with the loop.
+
+**How it returns:** the collector in `main.ts` is the loop's own polling step, extracted. The
+loop polls for itself, so rewiring it *replaces* the collector — the two never run together, or
+every source would be polled twice.
+
+**The plan of record for the control code: delete it.** Once this phase settles, the control
+modules, their tests and the documentation sections describing them are to be removed outright,
+leaving a pointer to the git commit that carries them — git is the attic, not the working tree.
+Decided, not yet done; this round only unwired it.
+
+---
+
 ## The review contract
 
 I am reviewing every line of this and must be able to explain it without notes. Code that is
@@ -403,17 +438,62 @@ batches, and any window shorter than the outage throws them all away — data th
 keep. The past-side check also buys nothing, because `INSERT OR IGNORE` already makes replay
 idempotent at any age.
 
+**Built 2026-08-11**, with three decisions folded in as it landed:
+
+- **Q6 is decided as the plan recommended: one bad reading does not sink the batch.** The valid
+  readings land; each reject is reported with its index and reason. A node cannot fix a bad
+  reading by resending it, so failing the batch holds eight good readings hostage to one bad
+  one, forever. For the same reason the response is **200 whenever the batch was processed**,
+  verdicts inside — a status a simple node reads as "retry" would have it replaying poison
+  until the end of time.
+- **A valid kind the instrument does not declare is rejected**, not stored: `bedroom_netatmo`
+  claiming `pm2_5` is a wrong sourceId in node firmware, and storing it files one instrument's
+  data under another's name, permanently.
+- **The below-300-ppm calibration diagnostic lives here now** (it was deferred with this
+  module): logged, never rejected. A drifted NDIR instrument is still reporting real air with a
+  shifted zero, and the low reading is the evidence of the fault — discarding it would hide the
+  diagnosis.
+
+There is no push authentication — see the open-endpoints decision in the read API section.
+
 ## The read API
 
 Two views of the same data, and one rule shared between them.
 
 | Endpoint | Shape |
 |---|---|
-| `GET /api/state` | **Room-level.** One value per `(room, kind)`, plus the current control decision and its reasoning. |
-| `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config. |
+| `GET /api/state` | **Room-level.** One value per `(room, kind)`, each naming its source and freshness. The control block is parked with the loop and returns with it. |
+| `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config, inactive ones included, `?from=&to=` as epoch ms (default last 24 h), `?kind=` to filter. |
 | `GET /api/sensors` | The config topology, so a client can interpret ids without reading files. |
 | `GET /api/sensors/:id/readings` | Per-instrument detail, when you want to see the raw instrument. |
+| `GET /api/unit/level` | The fan's actual level, read live over Modbus. This is how a wall-panel change stays visible while the loop's read-every-tick is parked. |
+| `POST /api/unit/level` | Sets the fan. `assertCommandedLevel` refuses 90 and 100. **Deliberately unauthenticated** — see below. |
+| `POST /api/readings` | Batch ingest for the push nodes: a JSON array of readings, each with its own `measuredAt`. Future rejected beyond 5 min of skew, any past accepted, replay idempotent. **Also unauthenticated** — same decision below. |
+| `GET /auth/netatmo` (+ `/callback`) | Netatmo OAuth onboarding, so no token is ever pasted by hand. |
 | `GET /health` | Liveness. |
+
+History range params are epoch milliseconds for the same reason the column is an integer: one
+representation per instant. There is no range cap — single user, trusted LAN, accepted.
+
+**Both write endpoints are open on the LAN (2026-08-11), reversing an earlier decision.** The
+C# prototype's unauthenticated actuation endpoint was a review finding, and the first build of
+this server answered it with a bearer token whose absence meant 503, never open. Removed
+knowingly, and the full argument for keeping it was on the table when it went:
+
+- For the **fan endpoint**, the residual attacker on a trusted LAN is a web page inside
+  someone's browser — CSRF, which a `text/plain` form body gets past JSON-only parsing, with
+  browser private-network blocking only partial — and while the loop is parked nothing pulls a
+  hostile 80 back down. What decided it anyway: everything such a caller can do is bounded by
+  construction — 20 to 80, never off, never above the grille ceiling — so the harm ceiling is a
+  noisy night, accepted by the person who sleeps there.
+- The **ingest endpoint** carries the sharper risk of the two, named before it went: a poisoned
+  reading outlives its request — it sits in the store, skews history and the calibration week —
+  and once the loop is rewired, invented bedroom CO₂ steers the fan from anything on the
+  network. Accepted with the same posture, same bounded actuator underneath.
+
+If exposure ever grows beyond the LAN or tailnet, auth returns **at the edge** (a tunnel with
+SSO in front of the whole service), not inside this process. There is no `INGEST_TOKEN`; the
+SEN66 nodes will POST bare JSON.
 
 **The room-level view resolves its value with the same precedence function the controller uses.**
 One implementation, two consumers. The dashboard therefore always shows what the controller is
@@ -445,15 +525,24 @@ src/
   sources/
     source.ts           SensorSource interface
     synthetic.ts        plausible CO₂ curves on a schedule, so `npm start` runs
-                        without hardware. A demo, not a plant model.
+                        without hardware. A demo, not a plant model. Never runs
+                        beside a real source — same source ids, real database.
+    collector.ts        poll -> store, each source on its own cadence. The
+                        loop's first step, extracted while the loop is parked.
+    netatmo.ts          pull adapter: OAuth refresh, gethomecoachsdata.
+                        fetch is injected the way OpenStream is in modbus-tcp.
+    netatmo-token.ts    the rotating refresh token, as a file on disk —
+                        deliberately not a database row. See "Configuration".
     tado.ts             pull adapter                          (not built yet)
-    netatmo.ts          pull adapter                          (not built yet)
   ingest/
-    http.ts             POST /api/readings                    (not built yet)
+    http.ts             batch validation and storage for POST /api/readings;
+                        the route itself lives in http/server.ts
   store/
     readings.ts         node:sqlite; append-only, no pruning path exists yet.
                         The only table there is.
-  control/
+  control/              policy, limiter and the loop are PARKED — built, tested,
+                        not wired; see the section up top. freshness stays live:
+                        /api/state judges readings through it via precedence.
     freshness.ts        PURE. reading + now + per-source window -> RoomSignal
     policy.ts           PURE. snapshot -> desired Level + sleeping + reasons
     limiter.ts          PURE. decision + current + last-change -> ControlOutcome
@@ -465,7 +554,7 @@ src/
     modbus-tcp.ts       real implementation, FC3 + FC6
     fake.ts             test double, records calls
   http/
-    server.ts           the read API                          (not built yet)
+    server.ts           the read API, POST /api/unit/level, netatmo onboarding
   main.ts               wiring only
 tests/
 ```
@@ -820,7 +909,30 @@ kinds, `isActive` flag and freshness window; per-`(room, kind)` precedence order
 compile error.
 
 Secrets — Tado and Netatmo OAuth, the Modbus host, the ingest token — come from environment
-variables and are never committed.
+variables and are never committed. One secret cannot live there:
+
+**The Netatmo refresh token lives in a file** (`data/netatmo-token.json`, `NETATMO_TOKEN_PATH`
+to move it), because Netatmo **rotates** it on every refresh — the reference worker observed
+this live against this device, it is not caution. Something mutable has to hold the current one,
+and the two other candidates lose: an environment variable cannot be rewritten by a running
+process, and the database gave up its last mutable row on purpose when `control_state` was cut —
+a credentials row would quietly re-spend that, and would put a live secret inside every database
+backup besides. The file is written atomically (temp + rename, mode 0600), the new token is
+persisted **before** the new access token is used (a crash in between must cost a poll, not the
+credential), and the adapter re-reads the file on every refresh, so a re-authorisation through
+`/auth/netatmo` takes effect without a restart. Cost, accepted: one more file to back up beside
+the database, and a secret unencrypted on disk — which `.env` already is. A corrupt file throws
+rather than falling back to the environment seed: the seed is stale after the first rotation,
+and silently using it is a lockout dressed as a fallback.
+
+Access-token expiry is deliberately not tracked. The token is used until Netatmo answers 401,
+then refreshed and the request retried once — that path has to exist anyway, and a timer doing
+the same job would be a second mechanism. The price is one wasted request every ~3 hours.
+
+**The Netatmo poll interval is 5 minutes, from an inequality rather than taste.** A reading is
+up to one vendor refresh (≤ 8 min) old when fetched, plus up to one poll interval older before
+the next fetch. Against the 15-minute freshness window the interval must stay under 7 minutes,
+or a healthy instrument periodically reads as stale through our own polling.
 
 Starting defaults, all to be tuned against reality:
 
@@ -875,7 +987,7 @@ and a single line eight hours ago does not tell you the flat is *still* out of c
 it would also have cost a second piece of state next to `pinnedSince` purely to remember that we
 had already spoken. One variable, and an alarm that behaves like an alarm.
 
-**One diagnostic, deferred with the module it belongs to:** any reading **below 300 ppm** is a
+**One diagnostic, built with the ingest endpoint it belongs to:** any reading **below 300 ppm** is a
 probable calibration fault — NDIR sensors self-calibrate by assuming they periodically see outdoor
 air, and a flat that never gets down to outdoor CO₂ will drift, shifting the whole band. That is a
 check on readings as they arrive, so it belongs in the ingest endpoint, which is not built.
@@ -915,7 +1027,9 @@ These are unresolved. Do not invent answers — ask.
    `Level` values, so this is a curiosity rather than a risk — but worth knowing when reading
    back a level the wall panel set.
 3. **Exact CO₂ thresholds.** Defaults above are guesses and need tuning against real readings.
-4. **Push authentication.** The SEN66 nodes need some shared secret to POST. Not yet decided.
+4. **Push authentication — decided (2026-08-11): none.** Every endpoint is open on the trusted
+   LAN; the acceptance and its bounds are recorded in the read-API section. If exposure ever
+   grows beyond the LAN or tailnet, auth arrives at the edge, in front of the whole service.
 
 ---
 
