@@ -1011,10 +1011,14 @@ points. Build it then, with the band recomputation it enables. See `docs/test-pl
   `Temporal.Instant` parameter; only `main.ts` calls `Temporal.Now.instant()`.
 - **Instants and `deepEqual` do not mix.** A `Temporal.Instant` keeps its state in internal
   slots, which `assert.deepEqual` cannot see — two *different* instants compare as deeply equal,
-  so a wrong timestamp passes silently. Every deep assertion on an instant-bearing shape goes
-  through `tests/support/deep-equal.ts`, which writes the instants out as ISO strings first, or
-  compares `epochMilliseconds` directly. A bare `assert.deepEqual` on anything carrying an
-  instant is a bug, and it is the one way this suite can go green while checking nothing.
+  so a wrong timestamp passes silently. Every assertion on an instant or an instant-bearing
+  shape goes through `tests/support/deep-equal.ts`, which writes the instants out as ISO strings
+  first — so the expected side can simply be the written-out string:
+  `assertDeepEqual(row.measuredAt, '2026-08-07T00:00:00Z')`. Raw `epochMilliseconds` appears
+  only where the number itself is the contract: the millisecond-truncation tests, the vendor's
+  seconds-to-milliseconds conversion, and the raw-SQL schema tests. A bare `assert.deepEqual` on
+  anything carrying an instant is a bug, and it is the one way this suite can go green while
+  checking nothing.
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings.
 - **The cases that matter** are the failure ones: sensor goes stale mid-run, Netatmo unreachable,

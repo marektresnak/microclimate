@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { SENSORS } from '../src/config.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from '../src/sources/synthetic.ts';
 import { openReadingStore } from '../src/store/readings.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 const NOW = Temporal.Instant.from('2026-01-15T21:00:00Z'); // 22:00 in Prague
 
@@ -42,11 +43,11 @@ describe('the synthetic sources', () => {
     const first = await source.poll(NOW);
     const twoMinutesLater = await source.poll(NOW.add({ minutes: 2 }));
 
-    // Compared as epoch numbers: two different instants deepEqual as equal, so
-    // comparing the instants themselves would pass even if quantisation broke.
-    assert.deepEqual(
-      first.map((reading) => reading.measuredAt.epochMilliseconds),
-      twoMinutesLater.map((reading) => reading.measuredAt.epochMilliseconds),
+    // Through the projecting helper: two different instants deepEqual as
+    // equal, so comparing them bare would pass even if quantisation broke.
+    assertDeepEqual(
+      first.map((reading) => reading.measuredAt),
+      twoMinutesLater.map((reading) => reading.measuredAt),
     );
     assert.equal(store.insert(first), 3);
     assert.equal(store.insert(twoMinutesLater), 0);

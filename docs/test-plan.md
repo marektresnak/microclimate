@@ -245,9 +245,10 @@ types, per-source freshness, config-only topology, and the storage schema.
   `Temporal.Instant` since 2026-08-12 — is passed in, so no test sleeps and no test is flaky.
 - **Instants never meet a bare `deepEqual`.** An instant's state lives in internal slots that
   `assert.deepEqual` cannot see, so two *different* instants compare as deeply equal and a wrong
-  timestamp passes silently. Instant-bearing shapes are asserted through
-  `tests/support/deep-equal.ts`, which writes instants out as ISO strings first; single instants
-  compare by `epochMilliseconds`.
+  timestamp passes silently. Instants and instant-bearing shapes are asserted through
+  `tests/support/deep-equal.ts`, which writes instants out as ISO strings first — the expected
+  side can simply be the written-out string. Raw `epochMilliseconds` appears only where the
+  number itself is the contract (millisecond truncation, the vendor's epoch seconds, raw SQL).
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings. Nothing asserts on call counts of a mocking library.
 - **Table-driven** where cases are uniform (threshold maps, quiet-hours boundaries); individually

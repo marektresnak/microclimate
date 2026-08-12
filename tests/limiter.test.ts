@@ -5,16 +5,11 @@ import { CONTROL } from '../src/config.ts';
 import { limit } from '../src/control/limiter.ts';
 import type { Decision } from '../src/domain/decision.ts';
 import type { CommandedLevel } from '../src/domain/level.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 const NOW = Temporal.Instant.from('2026-08-10T12:00:00Z');
 const DWELL = CONTROL.minDwell;
 const LONG_AGO = NOW.subtract({ hours: 24 });
-
-// Instants keep their state in internal slots that assert.equal cannot read, so
-// timestamps are compared by their epoch milliseconds throughout.
-function epochMsOf(instant: Temporal.Instant | undefined): number | undefined {
-  return instant?.epochMilliseconds;
-}
 
 function wants(desiredLevel: CommandedLevel, sleeping = false): Decision {
   return { desiredLevel, sleeping, reasons: ['because the test said so'] };
@@ -42,7 +37,7 @@ describe('increases', () => {
   it('restart the dwell clock', () => {
     const outcome = limit(wants(50), 20, LONG_AGO, NOW);
 
-    assert.equal(epochMsOf(outcome.lastChangeAt), epochMsOf(NOW));
+    assertDeepEqual(outcome.lastChangeAt, NOW);
   });
 });
 
@@ -52,7 +47,7 @@ describe('decreases', () => {
 
     assert.equal(outcome.level, 70);
     assert.equal(outcome.write, true);
-    assert.equal(epochMsOf(outcome.lastChangeAt), epochMsOf(NOW));
+    assertDeepEqual(outcome.lastChangeAt, NOW);
   });
 
   it('take six steps and an hour to walk the whole range down', () => {
@@ -113,11 +108,7 @@ describe('dwell', () => {
     for (let tick = 0; tick < 19; tick += 1) {
       const evaluation = limit(wants(20), 80, lastChangeAt, NOW.add({ seconds: 30 * tick }));
       assert.equal(evaluation.write, false);
-      assert.equal(
-        epochMsOf(evaluation.lastChangeAt),
-        epochMsOf(lastChangeAt),
-        'an evaluation must not restart the dwell',
-      );
+      assertDeepEqual(evaluation.lastChangeAt, lastChangeAt, 'an evaluation must not restart the dwell');
     }
 
     const onceElapsed = limit(wants(20), 80, lastChangeAt, lastChangeAt.add(DWELL));
@@ -147,7 +138,7 @@ describe('no change needed', () => {
 
     assert.equal(outcome.level, 50);
     assert.equal(outcome.write, false);
-    assert.equal(epochMsOf(outcome.lastChangeAt), epochMsOf(LONG_AGO));
+    assertDeepEqual(outcome.lastChangeAt, LONG_AGO);
   });
 });
 
@@ -182,7 +173,7 @@ describe('the sleep cap', () => {
 
     const outcome = limit(wants(30, true), 70, lastChangeAt, NOW);
 
-    assert.equal(epochMsOf(outcome.lastChangeAt), epochMsOf(lastChangeAt));
+    assertDeepEqual(outcome.lastChangeAt, lastChangeAt);
   });
 
   it('changes nothing when demand is already below it', () => {

@@ -6,9 +6,14 @@ import assert from 'node:assert/strict';
  * wrong timestamp passes silently. Every deep assertion on an instant-bearing
  * shape goes through here, which writes the instants out as ISO strings first —
  * where equality means what it says.
+ *
+ * Because both sides are projected, the expected side can simply BE the
+ * written-out string: `assertDeepEqual(row.measuredAt, '2026-08-07T00:00:00Z')`.
+ * Spell it the way `toString()` does — seconds always, no trailing zeros, `Z` —
+ * or the strings will honestly differ.
  */
-export function assertDeepEqual(actual: unknown, expected: unknown): void {
-  assert.deepEqual(instantsWrittenOut(actual), instantsWrittenOut(expected));
+export function assertDeepEqual(actual: unknown, expected: unknown, message?: string): void {
+  assert.deepEqual(instantsWrittenOut(actual), instantsWrittenOut(expected), message);
 }
 
 function instantsWrittenOut(value: unknown): unknown {

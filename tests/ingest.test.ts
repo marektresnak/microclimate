@@ -5,6 +5,7 @@ import { toIsoUtc } from '../src/domain/time.ts';
 import { ingestBatch } from '../src/ingest/http.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import type { ReadingStore } from '../src/store/readings.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 const NOW = Temporal.Instant.from('2026-08-11T12:00:00Z');
 const BEGINNING = Temporal.Instant.fromEpochMilliseconds(0);
@@ -100,7 +101,7 @@ describe('ingest', () => {
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, anHourOn);
     assert.equal(rows.length, 1);
     // When the reading genuinely first arrived — not when the retry did.
-    assert.equal(rows[0]?.receivedAt.epochMilliseconds, NOW.epochMilliseconds);
+    assertDeepEqual(rows[0]?.receivedAt, NOW);
 
     store.close();
   });
@@ -128,15 +129,14 @@ describe('ingest', () => {
     assert.deepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
     const backlog = store.readingsInRange('bedroom_netatmo', 'co2', yearsAgo, NOW);
     // Original measurement time, today's arrival time — never conflated.
-    assert.equal(backlog[0]?.measuredAt.epochMilliseconds, yearsAgo.epochMilliseconds);
-    assert.equal(backlog[0]?.receivedAt.epochMilliseconds, NOW.epochMilliseconds);
+    assertDeepEqual(backlog[0]?.measuredAt, yearsAgo);
+    assertDeepEqual(backlog[0]?.receivedAt, NOW);
 
     store.close();
   });
 
   it('treats an offset timestamp as the instant it names, not a new reading', () => {
     const store = openReadingStore(':memory:');
-    const tenUtc = Temporal.Instant.from('2026-08-11T10:00:00Z');
 
     const asUtc = ingest(store, [
       { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt: '2026-08-11T10:00:00Z' },
@@ -153,14 +153,13 @@ describe('ingest', () => {
 
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.measuredAt.epochMilliseconds, tenUtc.epochMilliseconds);
+    assertDeepEqual(rows[0]?.measuredAt, '2026-08-11T10:00:00Z');
 
     store.close();
   });
 
   it('stores every zone spelling of one instant as the same UTC epoch', () => {
     const store = openReadingStore(':memory:');
-    const halfPastSeven = Temporal.Instant.from('2026-08-06T07:30:00Z');
 
     const outcome = ingest(
       store,
@@ -185,7 +184,7 @@ describe('ingest', () => {
 
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.measuredAt.epochMilliseconds, halfPastSeven.epochMilliseconds);
+    assertDeepEqual(rows[0]?.measuredAt, '2026-08-06T07:30:00Z');
 
     store.close();
   });
@@ -204,12 +203,9 @@ describe('ingest', () => {
     assert.deepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
 
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
-    assert.deepEqual(
-      rows.map((row) => row.measuredAt.epochMilliseconds),
-      [
-        Temporal.Instant.from('2026-08-05T23:00:00Z').epochMilliseconds,
-        Temporal.Instant.from('2026-08-07T00:00:00Z').epochMilliseconds,
-      ],
+    assertDeepEqual(
+      rows.map((row) => row.measuredAt),
+      ['2026-08-05T23:00:00Z', '2026-08-07T00:00:00Z'],
     );
 
     store.close();

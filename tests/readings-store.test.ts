@@ -79,7 +79,7 @@ describe('the readings store', () => {
     store.insert([reading('bedroom_netatmo', 'co2', 812, measuredAt, NOW)]);
 
     const stored = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW)[0];
-    assert.equal(stored?.receivedAt.epochMilliseconds, NOW.subtract({ minutes: 9 }).epochMilliseconds);
+    assertDeepEqual(stored?.receivedAt, NOW.subtract({ minutes: 9 }));
 
     store.close();
   });
