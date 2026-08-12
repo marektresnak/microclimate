@@ -95,6 +95,40 @@ describe('precedence', () => {
     });
   });
 
+  it('breaks a tie between stale sources on precedence, not on where they sat in the array', () => {
+    // Not a hypothetical tie: the Tado poll quantises its timestamp, so both
+    // valves carry the identical measuredAt on every single cycle. When the
+    // vendor goes quiet they go stale together, still tied, and trust is the
+    // only thing left to decide with — which is what the ranked list is for.
+    // The lower-ranked valve is listed first here so that array order cannot be
+    // what produces the right answer.
+    const readings = [
+      reading('kids_room_tado_right', 'temperature', 23.1, 40 * MINUTE),
+      reading('kids_room_tado_left', 'temperature', 21.5, 40 * MINUTE),
+    ];
+
+    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+      status: 'stale',
+      sourceId: 'kids_room_tado_left',
+      value: 21.5,
+      measuredAt: NOW - 40 * MINUTE,
+    });
+  });
+
+  it('consults a lower-ranked source when the leading one has never reported', () => {
+    // The Home Coach leads for bedroom temperature. If it has said nothing at
+    // all, a stale valve reading is still the best information in the flat, and
+    // answering `missing` would throw away the one number there is.
+    const readings = [reading('bedroom_tado', 'temperature', 19.2, 40 * MINUTE)];
+
+    assert.deepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), {
+      status: 'stale',
+      sourceId: 'bedroom_tado',
+      value: 19.2,
+      measuredAt: NOW - 40 * MINUTE,
+    });
+  });
+
   it('resolves a room with exactly one source', () => {
     const readings = [reading('living_room_tado', 'temperature', 20.4, 30 * SECOND)];
 
