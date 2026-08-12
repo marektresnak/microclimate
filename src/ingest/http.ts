@@ -1,6 +1,7 @@
 import { SENSOR_IDS, SENSORS } from '../config.ts';
 import { MEASUREMENT_KINDS } from '../domain/measurement.ts';
 import type { MeasurementKind, Reading } from '../domain/measurement.ts';
+import { parseInstant, toIsoUtc } from '../domain/time.ts';
 import type { ReadingStore } from '../store/readings.ts';
 
 /**
@@ -125,20 +126,28 @@ function toReading(candidate: unknown, now: number): Reading | string {
     return 'value must be a finite number';
   }
 
-  // Integer epoch milliseconds, exactly what the column holds. Rejecting a
-  // float here beats the STRICT table refusing it with a column error later.
-  if (!('measuredAt' in candidate) || typeof candidate.measuredAt !== 'number' || !Number.isInteger(candidate.measuredAt)) {
-    return 'measuredAt must be integer epoch milliseconds';
+  // ISO 8601 with an explicit zone, which is what the API speaks in both
+  // directions. It becomes the integer the column holds right here, at the
+  // edge, exactly where a unit conversion would happen.
+  if (!('measuredAt' in candidate)) {
+    return 'measuredAt is missing';
   }
-  if (candidate.measuredAt > now + FUTURE_SKEW_MS) {
-    return `measuredAt is ${candidate.measuredAt - now} ms in the future`;
+  const measuredAt = parseInstant(candidate.measuredAt);
+  if (measuredAt === undefined) {
+    return 'measuredAt must be an ISO 8601 timestamp with a zone, e.g. 2026-08-12T09:36:00Z';
+  }
+  if (measuredAt > now + FUTURE_SKEW_MS) {
+    // Reported back as the instant the node claimed, not as a difference in
+    // milliseconds: the node has to find the fault in its own clock, and its
+    // clock reads in dates.
+    return `measuredAt ${toIsoUtc(measuredAt)} is more than ${FUTURE_SKEW_MS / 60_000} minutes ahead of this server`;
   }
 
   return {
     sourceId,
     kind,
     value: candidate.value,
-    measuredAt: candidate.measuredAt,
+    measuredAt,
     receivedAt: now,
   };
 }

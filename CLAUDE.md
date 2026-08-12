@@ -128,8 +128,10 @@ readability test on re-reading. Both are pure JavaScript with no transitive depe
 native code and no install scripts; the adapter exists only because Hono speaks web-standard
 Request/Response and Node does not. The bar for any further dependency is unchanged: something I
 would have to defend in an interview, admitted only when it absorbs boilerplate rather than
-decisions — which is also why the framework stops at routing and body plumbing, while every
-narrowing, the OAuth state and the precedence rule remain this project's own code.
+decisions — which is also why the framework stops at routing, body plumbing and the onboarding
+pages' HTML escaping (`hono/html`'s tagged template replaced a hand-rolled escaper on
+2026-08-12: it escapes every interpolation by default, so a future edit cannot forget to),
+while every narrowing, the OAuth state and the precedence rule remain this project's own code.
 
 Everything else is built in: `fetch`, `node:http` underneath the adapter, `node:sqlite`,
 `node:test`. The project held at zero dependencies until the day it stopped being the cheapest
@@ -320,12 +322,19 @@ retried batch must be a no-op. Duplicates in a metrics store do not announce the
 surface months later as spikes in a graph. Note the ignore keeps the *first* `received_at`, which
 is correct — that is when the reading genuinely first arrived.
 
-**Timestamps are integer epoch milliseconds, UTC.** Not ISO text. The reason is narrow and
+**Stored timestamps are integer epoch milliseconds, UTC.** Not ISO text. The reason is narrow and
 decisive: `measured_at` is part of a uniqueness constraint, so it must have exactly one
 representation per instant. `2026-08-09T13:45:30+02:00` and `2026-08-09T11:45:30Z` are the same
 moment and different strings, and the constraint would not catch the duplicate. Integers have one
 representation. The `measured_at_iso` generated column costs zero storage — it is computed on
 read — and makes `SELECT *` human-readable, so nothing is given up for this.
+
+**That argument is about the column, and it does not reach the wire.** The API speaks ISO 8601 in
+both directions and **no epoch millisecond is visible anywhere in it** — the two spellings above
+both parse to the same integer at the edge, so the constraint never sees a difference and dedup is
+untouched by being readable. `domain/time.ts` is the whole conversion, two functions, sitting in
+the same place a unit conversion would. What the store keeps and what the API says are separate
+decisions, and this is the one place they are allowed to disagree.
 
 **`measured_at` and `received_at` are never conflated.** Netatmo readings arrive minutes after
 they were taken, and a push node replaying a buffered backlog can deliver hours-old readings in
@@ -432,13 +441,20 @@ Until the rollup exists, **nothing prunes**. There is no code path that deletes 
 ## Ingest
 
 `POST /api/readings` accepts a **batch**: one request carrying many readings, each with its own
-`measured_at`. A SEN66 node reports nine measurements per cycle and must not make nine requests,
+`measuredAt`. A SEN66 node reports nine measurements per cycle and must not make nine requests,
 and a node that buffered through a network outage replays its backlog with the original
 timestamps intact.
 
+`measuredAt` is an ISO 8601 instant with an explicit zone, the same grammar the range params take
+and the same one the responses emit — see the read API section for why offsets are accepted and
+zone-less strings are not. **Epoch milliseconds are refused rather than guessed at**: it is the
+shape this endpoint used to take, and a node left on the old firmware must fail loudly instead of
+looking healthy while storing nothing.
+
 **Validate timestamps in one direction only: reject the future**, beyond about five minutes of
 clock skew. A node reporting 2106 would otherwise look eternally fresh and poison every decision
-downstream.
+downstream. The reject names the instant back — a node has to find the fault in its own clock, and
+its clock reads in dates.
 
 **Any past timestamp is accepted.** Rejecting old readings would discard exactly the buffered
 backlog that batching exists to carry: a node offline for twelve hours replays around 1,300
@@ -471,17 +487,42 @@ Two views of the same data, and one rule shared between them.
 | Endpoint | Shape |
 |---|---|
 | `GET /api/state` | **Room-level.** One value per `(room, kind)`, each naming its source and freshness. The control block is parked with the loop and returns with it. |
-| `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config, inactive ones included, `?from=&to=` as epoch ms (default last 24 h), `?kind=` to filter. |
+| `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config, inactive ones included, `?from=&to=` as ISO 8601 (default last 24 h), `?kind=` to filter. |
 | `GET /api/sensors` | The config topology, so a client can interpret ids without reading files. |
 | `GET /api/sensors/:id/readings` | Per-instrument detail, when you want to see the raw instrument. |
 | `GET /api/unit/level` | The fan's actual level, read live over Modbus. This is how a wall-panel change stays visible while the loop's read-every-tick is parked. |
 | `POST /api/unit/level` | Sets the fan. `assertCommandedLevel` refuses 90 and 100. **Deliberately unauthenticated** — see below. |
-| `POST /api/readings` | Batch ingest for the push nodes: a JSON array of readings, each with its own `measuredAt`. Future rejected beyond 5 min of skew, any past accepted, replay idempotent. **Also unauthenticated** — same decision below. |
+| `POST /api/readings` | Batch ingest for the push nodes: a JSON array of readings, each with its own ISO 8601 `measuredAt`. Future rejected beyond 5 min of skew, any past accepted, replay idempotent. **Also unauthenticated** — same decision below. |
 | `GET /auth/netatmo` (+ `/callback`) | Netatmo OAuth onboarding, so no token is ever pasted by hand. |
 | `GET /health` | Liveness. |
 
-History range params are epoch milliseconds for the same reason the column is an integer: one
-representation per instant. There is no range cap — single user, trusted LAN, accepted.
+**Every instant in this API is an ISO 8601 string, in and out. Epoch milliseconds never appear.**
+They are how the store keeps `measured_at` unique, which is an argument about a column; a client
+reading `2026-08-12T09:36:00.000Z` can see what it is looking at, and `1786527360000` is a number
+you have to go and paste somewhere to understand.
+
+- **Out: always UTC, always milliseconds** — `2026-08-12T09:36:00.000Z`, byte for byte what the
+  `measured_at_iso` generated column computes. Reading the database by hand and reading the API
+  give the same string.
+- **In: an ISO 8601 instant with an explicit zone**, `Z` or an offset. An offset is accepted and
+  normalised — two spellings of one moment become the same integer at the edge, so replay stays
+  idempotent across them, and a node whose clock reads in local time is not made to convert.
+- **A zone-less timestamp is refused**, not guessed at. `Date.parse` reads `2026-08-12T09:36:00`
+  as the *host's* local time, so the same request would mean different instants on the server and
+  on the laptop that sent it, and would shift by an hour twice a year besides — the machine
+  dependence quiet hours already refuses. A bare date is refused for the same reason a second
+  grammar is: one rule, spelled out in the error.
+- **A date that does not exist is refused.** Measured rather than assumed: `Date.parse` rejects
+  month 13, hour 25 and minute 61 on its own, but silently rolls `2026-02-31` forward into March.
+  Day of the month is the only field that does that, and `domain/time.ts` rebuilds the date to
+  catch it.
+
+There is no range cap — single user, trusted LAN, accepted.
+
+**`/api/state` reports `status` and `measuredAt`, and no age.** The freshness judgement is made
+here, against that source's own window and this server's clock. Handing the client an age invites
+it to make a second judgement against a clock that may not agree with ours, and two answers to one
+question is one too many. Anyone who wants to plot the gap has `measuredAt`.
 
 **Both write endpoints are open on the LAN (2026-08-11), reversing an earlier decision.** The
 C# prototype's unauthenticated actuation endpoint was a review finding, and the first build of
@@ -528,6 +569,9 @@ src/
     level.ts            Level, CommandedLevel, narrowing, one step up/down
     signal.ts           RoomSignal — fresh | stale | missing
     decision.ts         Snapshot, Decision, ControlOutcome
+    time.ts             PURE. the ISO 8601 the API speaks <-> the epoch ms the
+                        store keeps. Two functions, and the only place the
+                        wire format and the column format meet.
     precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
                         Shared by the controller and /api/state — one rule.
   sources/

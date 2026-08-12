@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { toIsoUtc } from '../src/domain/time.ts';
 import { ingestBatch } from '../src/ingest/http.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import type { ReadingStore } from '../src/store/readings.ts';
@@ -8,9 +9,12 @@ import type { ReadingStore } from '../src/store/readings.ts';
 const NOW = Date.UTC(2026, 7, 11, 12, 0);
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const ISO_REQUIRED = 'measuredAt must be an ISO 8601 timestamp with a zone, e.g. 2026-08-12T09:36:00Z';
 
+// Tests keep the arithmetic (`NOW - MINUTE`) and the helpers write the wire
+// format, so a case reads as the instant it is about rather than as a string.
 function co2(value: number, measuredAt: number): Record<string, unknown> {
-  return { sourceId: 'bedroom_netatmo', kind: 'co2', value, measuredAt };
+  return { sourceId: 'bedroom_netatmo', kind: 'co2', value, measuredAt: toIsoUtc(measuredAt) };
 }
 
 // Nine readings, the size of one SEN66 cycle — here three kinds over three
@@ -19,7 +23,7 @@ function nineReadings(): Record<string, unknown>[] {
   const batch: Record<string, unknown>[] = [];
 
   for (const minute of [3, 2, 1]) {
-    const measuredAt = NOW - minute * MINUTE;
+    const measuredAt = toIsoUtc(NOW - minute * MINUTE);
     batch.push({ sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt });
     batch.push({ sourceId: 'bedroom_netatmo', kind: 'temperature', value: 21.5, measuredAt });
     batch.push({ sourceId: 'bedroom_netatmo', kind: 'humidity', value: 47, measuredAt });
@@ -105,7 +109,7 @@ describe('ingest', () => {
 
     const beyondIt = ingest(store, [co2(840, NOW + 5 * MINUTE + 1)]);
     assert.equal('rejected' in beyondIt && beyondIt.rejected[0]?.index, 0);
-    assert.match(String('rejected' in beyondIt && beyondIt.rejected[0]?.reason), /in the future/);
+    assert.match(String('rejected' in beyondIt && beyondIt.rejected[0]?.reason), /ahead of this server/);
 
     store.close();
   });
@@ -126,9 +130,87 @@ describe('ingest', () => {
     store.close();
   });
 
+  it('treats an offset timestamp as the instant it names, not a new reading', () => {
+    const store = openReadingStore(':memory:');
+    const tenUtc = Date.UTC(2026, 7, 11, 10, 0);
+
+    const asUtc = ingest(store, [
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt: '2026-08-11T10:00:00Z' },
+    ]);
+    const asPrague = ingest(store, [
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt: '2026-08-11T12:00:00+02:00' },
+    ]);
+
+    // One moment, two spellings. The offset is resolved at the edge, so the
+    // store only ever sees the number and the uniqueness constraint catches the
+    // second as the duplicate it is — which is why accepting both costs nothing.
+    assert.deepEqual(asUtc, { stored: 1, duplicates: 0, rejected: [] });
+    assert.deepEqual(asPrague, { stored: 0, duplicates: 1, rejected: [] });
+
+    const rows = store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.measuredAt, tenUtc);
+
+    store.close();
+  });
+
+  it('stores every zone spelling of one instant as the same UTC epoch', () => {
+    const store = openReadingStore(':memory:');
+    const halfPastSeven = Date.UTC(2026, 7, 6, 7, 30);
+
+    const outcome = ingest(
+      store,
+      [
+        '2026-08-06T07:30:00Z',
+        '2026-08-06T07:30:00+00:00',
+        '2026-08-06T07:30:00-00:00',
+        '2026-08-06T09:30:00+02:00', // Prague in summer
+        '2026-08-06T08:30:00+01:00', // Prague in winter
+        '2026-08-06T02:30:00-05:00',
+        '2026-08-06T13:00:00+05:30', // half an hour, which an hours-only parse would lose
+        '2026-08-06T20:30:00+13:00',
+        '2026-08-05T19:30:00-12:00', // a day earlier on its own calendar
+      ].map((measuredAt) => ({ sourceId: 'bedroom_netatmo', kind: 'co2', value: 640, measuredAt })),
+    );
+
+    // Nine spellings of one moment, in one batch. The zone is resolved at the
+    // edge, so what reaches the column is a single number and the uniqueness
+    // constraint sees a single reading — which is why accepting offsets at all
+    // costs nothing.
+    assert.deepEqual(outcome, { stored: 1, duplicates: 8, rejected: [] });
+
+    const rows = store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.measuredAt, halfPastSeven);
+
+    store.close();
+  });
+
+  it('stores instants that differ as different readings, however alike they read', () => {
+    const store = openReadingStore(':memory:');
+
+    // The same wall clock at opposite ends of the offset range: 25 hours apart,
+    // on two different days. Treating the zone as decoration would file these
+    // as one reading and lose one of them permanently.
+    const outcome = ingest(store, [
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 640, measuredAt: '2026-08-06T12:00:00+13:00' },
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 705, measuredAt: '2026-08-06T12:00:00-12:00' },
+    ]);
+
+    assert.deepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
+
+    const rows = store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW);
+    assert.deepEqual(
+      rows.map((row) => row.measuredAt),
+      [Date.UTC(2026, 7, 5, 23, 0), Date.UTC(2026, 7, 7, 0, 0)],
+    );
+
+    store.close();
+  });
+
   it('lands the rest of the batch around one bad reading (Q6)', () => {
     const store = openReadingStore(':memory:');
-    const batch = [...nineReadings(), { sourceId: 'bedroom_netatmo', kind: 'co2', value: 'high', measuredAt: NOW }];
+    const batch = [...nineReadings(), { sourceId: 'bedroom_netatmo', kind: 'co2', value: 'high', measuredAt: toIsoUtc(NOW) }];
 
     const outcome = ingest(store, batch);
 
@@ -145,11 +227,11 @@ describe('ingest', () => {
     const store = openReadingStore(':memory:');
 
     const outcome = ingest(store, [
-      { sourceId: 'attic_sen66', kind: 'co2', value: 840, measuredAt: NOW },
-      { sourceId: 'bedroom_netatmo', kind: 'noise', value: 38, measuredAt: NOW },
+      { sourceId: 'attic_sen66', kind: 'co2', value: 840, measuredAt: toIsoUtc(NOW) },
+      { sourceId: 'bedroom_netatmo', kind: 'noise', value: 38, measuredAt: toIsoUtc(NOW) },
       // A real kind this instrument does not report — most likely a wrong
       // sourceId in node firmware, and filed forever under the wrong name.
-      { sourceId: 'bedroom_netatmo', kind: 'pm2_5', value: 4, measuredAt: NOW },
+      { sourceId: 'bedroom_netatmo', kind: 'pm2_5', value: 4, measuredAt: toIsoUtc(NOW) },
     ]);
 
     assert.deepEqual(outcome, {
@@ -171,9 +253,15 @@ describe('ingest', () => {
     const outcome = ingest(store, [
       co2(Number.NaN, NOW),
       co2(Number.POSITIVE_INFINITY, NOW),
-      { sourceId: 'bedroom_netatmo', kind: 'co2', measuredAt: NOW },
-      co2(840, NOW + 0.5),
+      { sourceId: 'bedroom_netatmo', kind: 'co2', measuredAt: toIsoUtc(NOW) },
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840 },
       { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt: 'today' },
+      // The shape this endpoint used to take. Guessing at it would let a node
+      // left on the old firmware look healthy while storing nothing.
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt: NOW },
+      // No zone, so `Date.parse` would read it as whatever the server's local
+      // time happens to be — a different instant per machine and per season.
+      { sourceId: 'bedroom_netatmo', kind: 'co2', value: 840, measuredAt: '2026-08-11T12:00:00' },
       42,
     ]);
 
@@ -186,9 +274,11 @@ describe('ingest', () => {
         { index: 0, reason: 'value must be a finite number' },
         { index: 1, reason: 'value must be a finite number' },
         { index: 2, reason: 'value must be a finite number' },
-        { index: 3, reason: 'measuredAt must be integer epoch milliseconds' },
-        { index: 4, reason: 'measuredAt must be integer epoch milliseconds' },
-        { index: 5, reason: 'not an object' },
+        { index: 3, reason: 'measuredAt is missing' },
+        { index: 4, reason: ISO_REQUIRED },
+        { index: 5, reason: ISO_REQUIRED },
+        { index: 6, reason: ISO_REQUIRED },
+        { index: 7, reason: 'not an object' },
       ],
     });
 

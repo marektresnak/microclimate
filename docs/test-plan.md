@@ -548,10 +548,42 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - unknown `kind` → rejected; so is a real kind the named instrument does not declare — a
   mislabelled reading files one instrument's data under another's name, permanently
 - wrong value type → rejected before it reaches SQLite, not by the STRICT table throwing
+- `measuredAt` as **epoch milliseconds → rejected**, in either spelling. It is the shape this
+  endpoint used to take, and a node left on the old firmware must fail loudly rather than look
+  healthy while storing nothing
+- `measuredAt` with no zone → rejected; it would otherwise mean a different instant per machine
+- **every zone spelling of one instant stores one row, carrying the correct UTC epoch** — nine
+  spellings in one batch land as `stored: 1, duplicates: 8`, and the stored integer is asserted
+  against `Date.UTC(...)` rather than against whatever the parser happened to produce
+- the same holds across requests, not only within a batch: a node that changes zone between
+  retries still replays idempotently
+- **instants that genuinely differ stay two readings**, even written with the same wall clock —
+  the +13:00/-12:00 pair, 25 hours apart, must not collapse into one row
+- *These were checked by mutation: making the parser ignore the offset fails all of them, and
+  fails nothing else. A test that cannot fail is not covering anything.*
 - a CO₂ reading below 300 ppm is stored and flagged in the log — probable calibration drift,
   and the reading is the evidence
 - ~~missing or wrong ingest token → 401~~ *removed 2026-08-11: ingest is open on the LAN like
   every other endpoint — the acceptance is recorded in CLAUDE.md*
+
+## `domain/time.ts`
+
+*Added 2026-08-12, when the API stopped speaking epoch milliseconds.*
+
+- what it writes is what `measured_at_iso` computes — one string for anyone reading the database
+  by hand and anyone reading the API
+- accepts `Z`, with or without seconds and their fraction
+- **every zone spelling of one instant reads as that one instant** — `Z`, `+00:00`, `-00:00`,
+  Prague in both halves of the year, a negative offset, `+05:30` (half an hour, which an
+  hours-only parse would lose) and `±13/12` (a day earlier or later on their own calendars)
+- **and instants the zone separates stay separated**: one wall clock at opposite ends of the
+  offset range is 25 hours apart across three calendar days
+- refuses a zone-less timestamp, a bare date, and epoch milliseconds in either spelling
+- refuses dates that do not exist. `Date.parse` rejects month 13, hour 25 and minute 61 on its
+  own; **day of the month is the one field it rolls forward instead**, so `2026-02-31`,
+  `2026-04-31` and `2027-02-29` are pinned — and `2028-02-29`, which does exist, is pinned beside
+  them so the guard cannot be tightened into rejecting leap days
+- round-trips whatever it wrote
 
 ## `store/readings.ts`
 
@@ -651,16 +683,28 @@ collector are alternatives in `main.ts`, never concurrent.*
 *Built 2026-08-11, with the loop parked. The control block of `/api/state` is parked with it;
 what was added instead:*
 
-- unknown rooms, sensors, kinds, timestamps, routes and methods are each refused with the right
-  status
+- **a reading posted in one zone, fetched over a window written in another, comes back in UTC** —
+  the whole round trip in one test: `13:59+02:00` in, `2026-08-11T11:59:00.000Z` out, and the
+  echoed `from`/`to` show which window was actually applied
+- unknown rooms, sensors and routes are refused with 404; a range bound that is not an ISO 8601
+  instant with an explicit zone is refused with 400 — including epoch milliseconds, a zone-less
+  string, and `2026-02-31`, which `Date.parse` would otherwise roll forward into March
+  *Trimmed 2026-08-12: the wrong-method 405, the `from > to` 400 and the unknown-`kind` 400 are
+  removed with the code that produced them — only their own tests ever consumed them. A wrong
+  method now gets the ordinary 404, and an inverted range or unknown kind honestly returns an
+  empty `readings`. The unparseable-bound rejection stays: `?from=yesterday` yielding an empty
+  array would read as "no data".*
 - `GET /api/unit/level` reads the fan live, and answers 502 when the unit does not
 - `POST /api/unit/level` refuses 90 and 100 through `assertCommandedLevel`, and answers 502 when
   the write fails. *The token cases were removed the same day they were written: the endpoint is
   deliberately unauthenticated on the trusted LAN, reversing the earlier finding — the
   acceptance and its bounds are recorded in CLAUDE.md, "The write endpoint is open on the LAN".*
 - `/auth/netatmo` issues a single-use `state` and keeps the client secret out of the browser URL
-- the callback rejects a forged state, an expired state (10 min), and a vendor refusal; a good
-  code is exchanged and the refresh token lands in the token file
+- the callback rejects a forged state and a vendor refusal; a good code is exchanged and the
+  refresh token lands in the token file
+  *Trimmed 2026-08-12: the 10-minute state expiry is removed. The single-use exact-match state
+  check is the CSRF defence and stays; the wall-clock deadline on top of it guarded against
+  nothing any caller does, and only its own test ever consumed it.*
 
 ---
 

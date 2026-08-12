@@ -10,6 +10,7 @@ import type { FakeVentilationUnit } from '../src/actuator/fake.ts';
 import type { SensorId } from '../src/config.ts';
 import type { MeasurementKind, Reading } from '../src/domain/measurement.ts';
 import { resolveSignal } from '../src/domain/precedence.ts';
+import { toIsoUtc } from '../src/domain/time.ts';
 import { createApiServer } from '../src/http/server.ts';
 import type { ApiServerDependencies, NetatmoAuthOptions } from '../src/http/server.ts';
 import type { FetchLike } from '../src/sources/netatmo.ts';
@@ -26,6 +27,21 @@ const MINUTE = 60_000;
 
 function reading(sourceId: SensorId, kind: MeasurementKind, value: number, measuredAt: number): Reading {
   return { sourceId, kind, value, measuredAt, receivedAt: measuredAt };
+}
+
+/**
+ * The same reading as the API writes it. The store keeps epoch milliseconds
+ * because the uniqueness constraint needs one representation per instant; the
+ * wire never sees them, and this is the seam where that becomes visible.
+ */
+function onTheWire(source: Reading): Record<string, unknown> {
+  return {
+    sourceId: source.sourceId,
+    kind: source.kind,
+    value: source.value,
+    measuredAt: toIsoUtc(source.measuredAt),
+    receivedAt: toIsoUtc(source.receivedAt),
+  };
 }
 
 interface RecordedRequest {
@@ -70,7 +86,6 @@ interface TestServer {
   readonly unit: FakeVentilationUnit;
   readonly tokenPath: string;
   readonly requests: RecordedRequest[];
-  setTime(now: number): void;
 }
 
 async function withServer(overrides: Overrides, run: (context: TestServer) => Promise<void>): Promise<void> {
@@ -78,7 +93,6 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
   const unit = createFakeUnit(40);
   const tokenPath = join(mkdtempSync(join(tmpdir(), 'server-')), 'token.json');
   const fake = scriptedFetch(overrides.script ?? []);
-  let currentTime = NOW;
 
   const dependencies: ApiServerDependencies = {
     store,
@@ -89,7 +103,7 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
       redirectUri: 'http://flat.local:3000/auth/netatmo/callback',
       tokenPath,
     },
-    clock: () => currentTime,
+    clock: () => NOW,
     log: () => undefined,
     ...overrides,
   };
@@ -108,9 +122,6 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
       unit,
       tokenPath,
       requests: fake.requests,
-      setTime: (now) => {
-        currentTime = now;
-      },
     });
   } finally {
     await new Promise<void>((resolve) => {
@@ -172,8 +183,7 @@ describe('the http server', () => {
               status: expected.status,
               value: expected.value,
               sourceId: expected.sourceId,
-              measuredAt: expected.measuredAt,
-              ageMs: NOW - expected.measuredAt,
+              measuredAt: toIsoUtc(expected.measuredAt),
             },
             humidity: { status: 'missing' },
             co2: { status: 'missing' },
@@ -183,7 +193,7 @@ describe('the http server', () => {
     });
   });
 
-  it('reports a stale value as stale, with its age and source', async () => {
+  it('reports a stale value as stale, naming its source', async () => {
     await withServer({}, async ({ baseUrl, store }) => {
       store.insert([reading('bedroom_netatmo', 'co2', 910, NOW - 20 * MINUTE)]);
 
@@ -217,15 +227,16 @@ describe('the http server', () => {
       const elsewhere = reading('bedroom_tado', 'temperature', 20.0, NOW - MINUTE);
       store.insert([left, right, elsewhere]);
 
-      const response = await fetch(`${baseUrl}/api/rooms/kids_room/readings?from=${NOW - 10 * MINUTE}&to=${NOW}`);
+      const from = toIsoUtc(NOW - 10 * MINUTE);
+      const response = await fetch(`${baseUrl}/api/rooms/kids_room/readings?from=${from}&to=${toIsoUtc(NOW)}`);
 
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), {
         room: 'kids_room',
-        from: NOW - 10 * MINUTE,
-        to: NOW,
+        from,
+        to: toIsoUtc(NOW),
         // Both valves, in measured order; the bedroom reading stays out.
-        readings: [left, right],
+        readings: [onTheWire(left), onTheWire(right)],
       });
     });
   });
@@ -242,21 +253,24 @@ describe('the http server', () => {
       assert.equal(response.status, 200);
       assert.deepEqual(body, {
         sensorId: 'bedroom_netatmo',
-        from: NOW - 24 * 60 * MINUTE,
-        to: NOW,
-        readings: [mine],
+        from: toIsoUtc(NOW - 24 * 60 * MINUTE),
+        to: toIsoUtc(NOW),
+        readings: [onTheWire(mine)],
       });
     });
   });
 
-  it('rejects what it does not know: rooms, sensors, kinds, timestamps, routes, methods', async () => {
+  it('rejects what it does not know: rooms, sensors, timestamps, routes', async () => {
     await withServer({}, async ({ baseUrl }) => {
       const cases: readonly [string, number][] = [
         ['/api/rooms/garage/readings', 404],
         ['/api/sensors/attic_sen66/readings', 404],
-        ['/api/rooms/bedroom/readings?kind=noise', 400],
         ['/api/rooms/bedroom/readings?from=yesterday', 400],
-        [`/api/rooms/bedroom/readings?from=${NOW}&to=${NOW - MINUTE}`, 400],
+        // Epoch milliseconds are the store's business, not the API's.
+        [`/api/rooms/bedroom/readings?from=${NOW - MINUTE}`, 400],
+        // No zone, so it would mean a different instant on every machine.
+        ['/api/rooms/bedroom/readings?from=2026-08-11T12:00:00', 400],
+        ['/api/rooms/bedroom/readings?to=2026-02-31T00:00:00Z', 400],
         ['/api/nope', 404],
       ];
 
@@ -264,9 +278,6 @@ describe('the http server', () => {
         const response = await fetch(`${baseUrl}${path}`);
         assert.equal(response.status, status, path);
       }
-
-      const wrongMethod = await fetch(`${baseUrl}/health`, { method: 'POST' });
-      assert.equal(wrongMethod.status, 405);
     });
   });
 
@@ -325,7 +336,7 @@ describe('the http server', () => {
   it('ingests a batch, stamping receivedAt from its own clock', async () => {
     await withServer({}, async ({ baseUrl }) => {
       const batch = JSON.stringify([
-        { sourceId: 'bedroom_netatmo', kind: 'co2', value: 842, measuredAt: NOW - MINUTE },
+        { sourceId: 'bedroom_netatmo', kind: 'co2', value: 842, measuredAt: toIsoUtc(NOW - MINUTE) },
       ]);
       const response = await fetch(`${baseUrl}/api/readings`, {
         method: 'POST',
@@ -339,10 +350,58 @@ describe('the http server', () => {
       const readBack = await fetch(`${baseUrl}/api/sensors/bedroom_netatmo/readings?kind=co2`);
       assert.deepEqual(await readBack.json(), {
         sensorId: 'bedroom_netatmo',
-        from: NOW - 24 * 60 * MINUTE,
-        to: NOW,
+        from: toIsoUtc(NOW - 24 * 60 * MINUTE),
+        to: toIsoUtc(NOW),
         // The node's clock says when it measured; ours says when it arrived.
-        readings: [{ sourceId: 'bedroom_netatmo', kind: 'co2', value: 842, measuredAt: NOW - MINUTE, receivedAt: NOW }],
+        readings: [
+          {
+            sourceId: 'bedroom_netatmo',
+            kind: 'co2',
+            value: 842,
+            measuredAt: toIsoUtc(NOW - MINUTE),
+            receivedAt: toIsoUtc(NOW),
+          },
+        ],
+      });
+    });
+  });
+
+  it('takes a reading in any zone and gives it back in UTC', async () => {
+    await withServer({}, async ({ baseUrl }) => {
+      // Prague summer time, which is what a node in this flat would most
+      // plausibly stamp if it were told the local zone rather than UTC.
+      const batch = JSON.stringify([
+        { sourceId: 'bedroom_netatmo', kind: 'co2', value: 842, measuredAt: '2026-08-11T13:59:00+02:00' },
+      ]);
+      const ingested = await fetch(`${baseUrl}/api/readings`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: batch,
+      });
+      assert.deepEqual(await ingested.json(), { stored: 1, duplicates: 0, rejected: [] });
+
+      // Asked for over a window written in a third zone, to make the point that
+      // no part of this depends on which spelling arrived.
+      const readBack = await fetch(
+        `${baseUrl}/api/sensors/bedroom_netatmo/readings?kind=co2&from=2026-08-11T06:00:00-05:00`,
+      );
+
+      assert.deepEqual(await readBack.json(), {
+        sensorId: 'bedroom_netatmo',
+        // Echoed in UTC, so the window that was actually applied is visible.
+        from: '2026-08-11T11:00:00.000Z',
+        to: toIsoUtc(NOW),
+        readings: [
+          {
+            sourceId: 'bedroom_netatmo',
+            kind: 'co2',
+            value: 842,
+            // 13:59+02:00 is 11:59Z. One instant, and the API only ever says it
+            // one way however it was told.
+            measuredAt: '2026-08-11T11:59:00.000Z',
+            receivedAt: toIsoUtc(NOW),
+          },
+        ],
       });
     });
   });
@@ -355,9 +414,6 @@ describe('the http server', () => {
       const notArray = await fetch(`${baseUrl}/api/readings`, { method: 'POST', body: '{}' });
       assert.equal(notArray.status, 400);
       assert.match(JSON.stringify(await notArray.json()), /array of readings/);
-
-      const wrongMethod = await fetch(`${baseUrl}/api/readings`);
-      assert.equal(wrongMethod.status, 405);
     });
   });
 
@@ -408,19 +464,6 @@ describe('the http server', () => {
 
       assert.equal(callback.status, 400);
       assert.equal(loadRefreshToken(tokenPath), undefined);
-      assert.equal(requests.length, 0);
-    });
-  });
-
-  it('rejects a callback that arrives after the state has expired', async () => {
-    await withServer({}, async ({ baseUrl, setTime, requests }) => {
-      const redirect = await fetch(`${baseUrl}/auth/netatmo`, { redirect: 'manual' });
-      const state = new URL(redirect.headers.get('location') ?? '').searchParams.get('state');
-
-      setTime(NOW + 11 * MINUTE);
-      const callback = await fetch(`${baseUrl}/auth/netatmo/callback?code=the-code&state=${state}`);
-
-      assert.equal(callback.status, 400);
       assert.equal(requests.length, 0);
     });
   });

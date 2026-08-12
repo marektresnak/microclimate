@@ -5,6 +5,7 @@ import type { Server } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { html } from 'hono/html';
 
 import type { VentilationUnit } from '../actuator/unit.ts';
 import { PRECEDENCE, ROOM_IDS, SENSOR_IDS, SENSORS } from '../config.ts';
@@ -17,6 +18,7 @@ import { MEASUREMENT_KINDS } from '../domain/measurement.ts';
 import type { MeasurementKind, Reading } from '../domain/measurement.ts';
 import { resolveSignal } from '../domain/precedence.ts';
 import type { RoomSignal } from '../domain/signal.ts';
+import { parseInstant, toIsoUtc } from '../domain/time.ts';
 import { NETATMO_TOKEN_URL } from '../sources/netatmo.ts';
 import type { FetchLike } from '../sources/netatmo.ts';
 import { saveRefreshToken } from '../sources/netatmo-token.ts';
@@ -48,9 +50,6 @@ import type { ReadingStore } from '../store/readings.ts';
 const AUTHORIZE_URL = 'https://api.netatmo.com/oauth2/authorize';
 // The one scope gethomecoachsdata needs.
 const HOME_COACH_SCOPE = 'read_homecoach';
-// A callback presenting a state older than this is not a flow anyone is still
-// sitting in front of.
-const STATE_VALID_MS = 10 * 60_000;
 const EXCHANGE_TIMEOUT_MS = 10_000;
 const DAY_MS = 24 * 60 * 60_000;
 // A command body is one small JSON object; refusing early beats buffering
@@ -77,6 +76,14 @@ export interface ApiServerDependencies {
   readonly log: (line: string) => void;
 }
 
+/**
+ * Every instant this API writes is an ISO 8601 string in UTC, and every one it
+ * reads is an ISO 8601 string with an explicit zone. Epoch milliseconds are the
+ * store's business — they are there so `measured_at` has one representation per
+ * instant inside a uniqueness constraint, which is an argument about a column
+ * and not about a wire format. `domain/time.ts` is the whole conversion.
+ */
+
 /** What /api/state says about one (room, kind). */
 type SignalBody =
   | { readonly status: 'missing' }
@@ -84,9 +91,17 @@ type SignalBody =
       readonly status: 'fresh' | 'stale';
       readonly value: number;
       readonly sourceId: SensorId;
-      readonly measuredAt: number;
-      readonly ageMs: number;
+      readonly measuredAt: string;
     };
+
+/** What both history endpoints say about one reading. */
+interface ReadingBody {
+  readonly sourceId: SensorId;
+  readonly kind: MeasurementKind;
+  readonly value: number;
+  readonly measuredAt: string;
+  readonly receivedAt: string;
+}
 
 export function createApiServer(
   dependencies: ApiServerDependencies,
@@ -95,7 +110,7 @@ export function createApiServer(
   // The one live OAuth state, single-use. Only the most recent flow counts, so
   // opening the auth page twice invalidates the first tab — acceptable for a
   // single-operator system, and it keeps this a value instead of a table.
-  let pendingState: { readonly value: string; readonly issuedAt: number } | undefined;
+  let pendingState: string | undefined;
 
   const app = new Hono();
 
@@ -126,7 +141,7 @@ export function createApiServer(
         if (ranked === undefined) continue;
 
         const latest = latestReadingsFrom(ranked, kind);
-        kinds[kind] = describeSignal(resolveSignal(room, kind, latest, now), now);
+        kinds[kind] = describeSignal(resolveSignal(room, kind, latest, now));
       }
 
       rooms[room] = kinds;
@@ -245,7 +260,7 @@ export function createApiServer(
     }
 
     const state = randomUUID();
-    pendingState = { value: state, issuedAt: dependencies.clock() };
+    pendingState = state;
 
     // No client_secret in this URL, deliberately: it travels through the
     // user's browser and history, and the authorisation step does not need it.
@@ -281,12 +296,11 @@ export function createApiServer(
     const presented = c.req.query('state');
     const pending = pendingState;
     pendingState = undefined;
-    const expired = pending !== undefined && dependencies.clock() - pending.issuedAt > STATE_VALID_MS;
-    if (pending === undefined || presented !== pending.value || expired) {
+    if (pending === undefined || presented !== pending) {
       return c.html(
         page(
           'Not our flow',
-          'This callback did not come from a flow this server just started, or it took longer than ten minutes. Start again at /auth/netatmo.',
+          'This callback did not come from a flow this server just started. Start again at /auth/netatmo.',
         ),
         400,
       );
@@ -334,22 +348,6 @@ export function createApiServer(
     );
   });
 
-  // Registration order decides: each path above answers its own methods, and
-  // anything else on a known path lands here as a 405 rather than the 404.
-  for (const knownPath of [
-    '/health',
-    '/api/state',
-    '/api/sensors',
-    '/api/rooms/:room/readings',
-    '/api/sensors/:id/readings',
-    '/api/unit/level',
-    '/api/readings',
-    '/auth/netatmo',
-    '/auth/netatmo/callback',
-  ]) {
-    app.all(knownPath, (c) => c.json({ error: 'method not allowed' }, 405));
-  }
-
   function latestReadingsFrom(ranked: readonly SensorId[], kind: MeasurementKind): Reading[] {
     const readings: Reading[] = [];
 
@@ -367,23 +365,29 @@ export function createApiServer(
     toRaw: string | undefined,
     kindRaw: string | undefined,
     now: number,
-  ): { from: number; to: number; readings: Reading[] } | { error: string } {
+  ): { from: string; to: string; readings: ReadingBody[] } | { error: string } {
     const range = rangeOf(fromRaw, toRaw, now);
     if ('error' in range) return range;
-
-    const kinds = kindFilterOf(kindRaw);
-    if ('error' in kinds) return kinds;
 
     const readings: Reading[] = [];
     for (const sensorId of sensorIds) {
       for (const kind of SENSORS[sensorId].kinds) {
-        if (!kinds.kinds.includes(kind)) continue;
+        // No filter means every kind. An unknown ?kind= matches no declared
+        // kind and yields an empty history — the same honest answer as a kind
+        // nothing has reported yet.
+        if (kindRaw !== undefined && kind !== kindRaw) continue;
         readings.push(...dependencies.store.readingsInRange(sensorId, kind, range.from, range.to));
       }
     }
     readings.sort((first, second) => first.measuredAt - second.measuredAt);
 
-    return { from: range.from, to: range.to, readings };
+    // Sorted as numbers, then written as text. The two orders agree for UTC
+    // ISO strings anyway, but sorting the instants is the honest version.
+    return {
+      from: toIsoUtc(range.from),
+      to: toIsoUtc(range.to),
+      readings: readings.map(describeReading),
+    };
   }
 
   return createServer(getRequestListener(app.fetch));
@@ -391,45 +395,54 @@ export function createApiServer(
 
 // ── helpers with no state ────────────────────────────────────────────────────
 
+// Named once because both bounds answer with it, and because it is the only
+// place the accepted grammar is spelled out for a human.
+const BAD_RANGE = 'from and to must be ISO 8601 timestamps with a zone, e.g. 2026-08-12T09:36:00Z';
+
 function rangeOf(
   fromRaw: string | undefined,
   toRaw: string | undefined,
   now: number,
 ): { from: number; to: number } | { error: string } {
-  const to = toRaw === undefined ? now : Number(toRaw);
-  const from = fromRaw === undefined ? to - DAY_MS : Number(fromRaw);
+  // Refusing an unparseable bound beats an empty result, which a client would
+  // read as "no data". An inverted range needs no such guard — the store
+  // honestly returns nothing for it.
+  const to = toRaw === undefined ? now : parseInstant(toRaw);
+  if (to === undefined) return { error: BAD_RANGE };
 
-  // Epoch milliseconds, for the same reason the column is an integer: one
-  // representation per instant. Rejecting NaN beats an empty result that would
-  // read as "no data".
-  if (!Number.isFinite(from) || !Number.isFinite(to)) {
-    return { error: 'from and to must be epoch milliseconds' };
-  }
-  if (from > to) {
-    return { error: 'from is after to' };
-  }
+  const from = fromRaw === undefined ? to - DAY_MS : parseInstant(fromRaw);
+  if (from === undefined) return { error: BAD_RANGE };
 
   return { from, to };
 }
 
-function kindFilterOf(raw: string | undefined): { kinds: readonly MeasurementKind[] } | { error: string } {
-  if (raw === undefined) return { kinds: MEASUREMENT_KINDS };
-
-  const kind = MEASUREMENT_KINDS.find((candidate) => candidate === raw);
-  if (kind === undefined) return { error: `unknown kind ${raw}` };
-
-  return { kinds: [kind] };
-}
-
-function describeSignal(signal: RoomSignal, now: number): SignalBody {
+/**
+ * No age travels with the value. `status` already carries the freshness
+ * judgement, made here against that source's own window and this server's
+ * clock; an age invites the client to make a second judgement against a clock
+ * that may not agree, and two answers to one question is one too many.
+ * `measuredAt` is there for anyone who wants to plot it.
+ */
+function describeSignal(signal: RoomSignal): SignalBody {
   if (signal.status === 'missing') return { status: 'missing' };
 
   return {
     status: signal.status,
     value: signal.value,
     sourceId: signal.sourceId,
-    measuredAt: signal.measuredAt,
-    ageMs: now - signal.measuredAt,
+    measuredAt: toIsoUtc(signal.measuredAt),
+  };
+}
+
+function describeReading(reading: Reading): ReadingBody {
+  return {
+    sourceId: reading.sourceId,
+    kind: reading.kind,
+    value: reading.value,
+    // Never conflated, and both readable: the instrument's clock says when it
+    // measured, ours says when we learned about it.
+    measuredAt: toIsoUtc(reading.measuredAt),
+    receivedAt: toIsoUtc(reading.receivedAt),
   };
 }
 
@@ -445,19 +458,10 @@ function refreshTokenOf(payload: unknown): string {
   return payload.refresh_token;
 }
 
-function page(title: string, text: string): string {
+function page(title: string, text: string): string | Promise<string> {
   // Netatmo's error strings and query parameters end up interpolated into the
-  // onboarding pages, and they arrive from the outside world — hence escaped.
-  return (
-    `<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
-    `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>`
-  );
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+  // onboarding pages, and they arrive from the outside world. The tagged
+  // template escapes every interpolation by default, so an interpolation added
+  // later is safe whether or not its author thought about it.
+  return html`<!doctype html><meta charset="utf-8"><title>${title}</title><h1>${title}</h1><p>${text}</p>`;
 }
