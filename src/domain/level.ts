@@ -8,10 +8,6 @@ export type Level = 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100;
 // would accept 90 and 100. We never send them.
 export type CommandedLevel = 20 | 30 | 40 | 50 | 60 | 70 | 80;
 
-// Physical, not tuning. 20 is what the unit does; 80 is what the grille allows.
-export const MIN_LEVEL: CommandedLevel = 20;
-export const MAX_COMMANDED_LEVEL: CommandedLevel = 80;
-
 const READABLE_LEVELS: readonly Level[] = [20, 30, 40, 50, 60, 70, 80, 90, 100];
 const COMMANDED_LEVELS: readonly CommandedLevel[] = [20, 30, 40, 50, 60, 70, 80];
 
@@ -32,17 +28,4 @@ export function assertCommandedLevel(value: number): CommandedLevel {
     throw new Error(`${value} is not a commandable level (20-80 in steps of 10)`);
   }
   return found;
-}
-
-/** Quantises a percentage from the proportional band onto the seven legal steps. */
-export function toCommandedLevel(percent: number): CommandedLevel {
-  const stepped = Math.round(percent / 10) * 10;
-  const clamped = Math.min(Math.max(stepped, MIN_LEVEL), MAX_COMMANDED_LEVEL);
-  return assertCommandedLevel(clamped);
-}
-
-/** One step down, or the floor. Decreases are the only rate-limited direction. */
-export function stepDown(level: CommandedLevel): CommandedLevel {
-  const index = COMMANDED_LEVELS.indexOf(level);
-  return COMMANDED_LEVELS[index - 1] ?? MIN_LEVEL;
 }

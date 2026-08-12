@@ -6,8 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
  * on the machine.
  *
  * The second table in the file, and append-only like the first — a log line is
- * a fact about a point in time, so the no-mutable-row property the store was
- * cut down to when `control_state` went is untouched. There is no severity
+ * a fact about a point in time, so the database keeps its no-mutable-row
+ * property untouched. There is no severity
  * column: the lines carry no level today, and a taxonomy invented for a few
  * hundred lines a day serves no consumer — a time range and an eye find
  * everything. Nothing prunes, same as the readings; tens of megabytes a year

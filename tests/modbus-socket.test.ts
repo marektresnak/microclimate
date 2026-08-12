@@ -87,7 +87,7 @@ describe('talking over a real socket', () => {
   it('gives up on a connection that is never accepted, inside its budget', async () => {
     // 192.0.2.1 is TEST-NET-1: reserved for documentation and routed nowhere, so
     // the SYN goes unanswered. Left to the operating system this blocks for over
-    // a minute; the control loop runs every thirty seconds.
+    // a minute, with an API caller waiting on the answer.
     const unreachable = createModbusUnit({
       host: '192.0.2.1',
       port: 502,

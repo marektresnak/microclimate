@@ -7,8 +7,8 @@ import type { VentilationUnit } from './unit.ts';
  * one. Not a mock: nothing asserts on call counts, and `level` is public so a
  * test can move it the way a person at the wall panel would.
  *
- * It also stands in for the real unit in `npm start` until the Modbus adapter
- * exists, which is why the failure switches are here rather than in a test file.
+ * It also stands in for the real unit in `npm start` when no HRV_MODBUS_HOST is
+ * set, which is why the failure switches are here rather than in a test file.
  */
 export interface FakeVentilationUnit extends VentilationUnit {
   readonly commands: readonly CommandedLevel[];

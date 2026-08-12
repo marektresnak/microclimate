@@ -158,8 +158,8 @@ export function createModbusUnit(
   //
   // The host and port get no such guard, deliberately. A nonsense port fails
   // loudly on every attempt with the operating system's own message, which the
-  // loop logs and recovers from; there is nothing silent to protect against, and
-  // a guard per field would be ceremony rather than defence.
+  // caller logs and recovers from; there is nothing silent to protect against,
+  // and a guard per field would be ceremony rather than defence.
   //
   // TEACHING: 1–247 is the Modbus spec's range for addressable devices. 0 is
   // "broadcast to everyone, nobody replies"; 248–255 are reserved.
@@ -315,7 +315,7 @@ export function createModbusUnit(
 
       // FC6 echoes back the register and the value it wrote. A disagreeing echo
       // means something else is on the wire, and reporting success would leave
-      // the loop believing a level the unit never took.
+      // the caller believing a level the unit never took.
       //
       // TEACHING: for FC6 the body is [reg hi, reg lo, value hi, value lo] —
       // four bytes, no byte count. Hence the different length check from read().
@@ -555,7 +555,8 @@ function openTcpStream(host: string, port: number, timeoutMs: number): Promise<B
 
     // Connecting has to sit inside the budget. Left to the operating system, an
     // address that has stopped answering SYNs blocks for over a minute per
-    // attempt, against a thirty-second control cycle.
+    // attempt — with retries, minutes against an API caller waiting for the
+    // answer.
     //
     // An explicit timer rather than `socket.setTimeout`, which reads zero as "no
     // timeout at all" — so a misconfigured budget would hang here forever rather

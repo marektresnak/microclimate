@@ -1,14 +1,15 @@
 # microclimate
 
 A service that collects readings from the sensors in my flat, stores them, exposes them over a
-small JSON API, and drives the HRV (heat-recovery ventilation) unit based on air quality —
-primarily CO₂.
+small JSON API, and sets the HRV (heat-recovery ventilation) unit's fan level over Modbus when
+asked to.
 
-**It is a collection platform that currently ships one automation.** Long term this is where
-home metrics live: more automations will read from the same store, and a dashboard will be built
-on top of it. That shapes the data model — provenance, timestamps and units are designed for a
-reader that does not exist yet — but it does **not** license building a rule engine, a plugin
-system, or an automation registry. See "Growth without a framework" below.
+**It is a collection platform.** Long term this is where home metrics live: automations will
+read from the same store — the first one, driving the HRV from CO₂, is planned and not yet
+built (see "The automation comes later" below) — and a dashboard will be built on top. That
+shapes the data model — provenance, timestamps and units are designed for a reader that does
+not exist yet — but it does **not** license building a rule engine, a plugin system, or an
+automation registry. See "Growth without a framework" below.
 
 **This is also a job-application work sample.** A reviewer should be able to read it and form an
 opinion in 15–30 minutes. That sets the bar for everything below: small, obvious, well-tested,
@@ -17,38 +18,27 @@ it cold, it is the wrong change.
 
 ---
 
-## The control loop is parked — the service collects, a human drives
+## The automation comes later — the service collects, a human drives
 
-**As of 2026-08-11 the loop is not wired.** `main.ts` runs collection (sources → store), the
-read API, and one write endpoint. Nothing automatic moves the fan; it is driven by
-the wall panel or by `POST /api/unit/level`. The control code — `src/control/`, the scripted
-traces — stays in the tree and green in CI: built and tested, deliberately unwired.
+Nothing automatic moves the fan. `main.ts` runs collection (sources → store), the read API, and
+one write endpoint; the fan is driven by the wall panel or by `POST /api/unit/level`, and the
+service adds observability, not protection — a hand-set 80 at 23:30 runs all night, exactly as
+it would have before this service existed.
 
-**Why.** The band is an estimate until a week of real settling points exists (see "What is
-actually known about this flat"), and convergence cannot be validated before that data does.
-Rather than let a controller tuned by guesses drive the flat, the automation waits for its
-calibration data — and manual control over the API is the instrument of that campaign: hold a
-level, watch CO₂ settle, log it. The loop comes back with a band computed from measurement.
+**The intention is that an automation will drive the fan from CO₂**, and a first implementation
+existed: a proportional controller with its own polling loop, built test-first and green. It
+was removed rather than shipped, because every number it depended on was an assumption — how
+much air the unit actually moves in this flat, and therefore how CO₂ responds to a level
+change, has never been measured, and an automation tuned by guesses is not something to let
+drive the flat. Git is the attic, not the working tree: **the last commit carrying that
+implementation is [`a75fba3`](https://github.com/marektresnak/microclimate/tree/a75fba33d1969e072f918b45944595cb0659f160)**
+(`src/control/`, its tests, and the documentation sections that reasoned it out).
 
-**What is suspended while it is parked, said out loud:**
-
-- **The hard requirement is suspended.** Nothing corrects a fan left loud while someone is
-  asleep — a hand-set 80 at 23:30 runs all night. This returns the flat to its actual status
-  quo (wall panel plus human memory); the service adds observability, not yet protection. There
-  is deliberately **no quiet-hours check on the POST endpoint**: the wall panel would bypass it
-  anyway, and partial cover that reads as protection is worse than a known gap (R8's words).
-- The pinned-at-ceiling diagnostic, the startup adoption of the unit's level (Q4), and the
-  sleep logic run only in tests.
-- `/api/state` carries no control block. It returns with the loop.
-
-**How it returns:** the collector in `main.ts` is the loop's own polling step, extracted. The
-loop polls for itself, so rewiring it *replaces* the collector — the two never run together, or
-every source would be polled twice.
-
-**The plan of record for the control code: delete it.** Once this phase settles, the control
-modules, their tests and the documentation sections describing them are to be removed outright,
-leaving a pointer to the git commit that carries them — git is the attic, not the working tree.
-Decided, not yet done; this round only unwired it.
+**This phase gathers the data that was missing.** Manual control over the API is the
+instrument: hold a level, watch CO₂ settle, log it — the service log records every level set
+over the API next to the CO₂ curve it explains. When a stretch of real readings exists, the
+automation returns designed against measurement rather than assumption, as a pure function
+reading from the same store. The collector is its polling step already in place.
 
 ---
 
@@ -171,10 +161,7 @@ Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push l
 
   `~/RiderProjects/DaphneControl` has files under `Sensors/Netatmo/`, and they are **stubs** —
   every method throws `NotImplementedException`. There is no auth flow, no endpoint and no response
-  shape to recover there, so `netatmo-sync` is the only reference. Its one real contribution is a
-  comment on `ISensor`: *"if the bedroom CO2 is over some threshold, we can assume someone is
-  sleeping and restrict max fan speed to 50%"* — which is where `SLEEP_CO2` and `sleepMaxLevel`
-  came from, already absorbed above.
+  shape to recover there, so `netatmo-sync` is the only reference.
 - **SEN66** — Sensirion nine-in-one node (PM1, PM2.5, PM4, PM10, temperature, humidity, VOC
   index, NOx index, CO₂) over I²C behind an ESP32, pushing JSON to us. Not built yet; the
   ingest endpoint and a simulator script stand in.
@@ -197,38 +184,11 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   flat cannot pass enough air above roughly 80%, so running higher makes the fan work against a
   restriction: noisy, inefficient, and it unbalances supply against extract on a heat-recovery
   unit. The device would accept 90 and 100. **We never send them.**
-- There is a wall panel. Someone may change the level by hand. **We act on that in exactly one
-  case: when it would make the flat loud while somebody is asleep.**
-
-  The actual level is read back every tick and reported next to the desired level in `/api/state`,
-  so any mismatch is visible. If the unit is above `sleepMaxLevel` while sleep is asserted, that
-  level is handed to the limiter as where the unit really is, and the existing cap path pulls it
-  back in one move. Otherwise the controller decides from its own last commanded value, and the
-  hand-set level survives until our decision changes for its own reasons.
-
-  **A hand-set level *below* the cap is never undone.** A quieter fan harms nobody, so the panel
-  stays good for the thing people actually reach for it at night. That is strictly better than the
-  original design, which reasserted unconditionally and pushed a hand-set 30 back up to 50.
-
-  **This makes the hard requirement depend on the Modbus read.** A unit we cannot read is a unit
-  whose level we do not know, so a hand-set breach goes uncorrected for as long as reads are
-  failing — the loop logs each failure and enforces the cap again on the first tick that answers.
-  Correct by necessity rather than by choice, but it is a dependency the requirement did not have
-  before the cap started consulting the read-back, and it is worth knowing when reads get flaky.
-
-  This is the third position this decision has occupied, and the reasoning for landing here is
-  worth keeping. Reasserting *always* makes the panel useless, which two independent reviewers
-  argued against. Reasserting *never* — briefly the design, for one round — means a hand-set 80 at
-  23:30 runs all night while the log reports *"50% held"*, so the one hard requirement in the
-  product loses to a button press. **Correcting only a breach of the cap is the smallest mechanism
-  that makes the hard requirement actually hard**, and the asymmetry it introduces is one sentence:
-  we ignore the panel except when it would make the flat loud while someone is asleep.
-- **If the service dies, the unit holds its last commanded level indefinitely.** There is no
-  watchdog and we do not set a safe level on shutdown. A crash at 21:30 with the unit at 80 leaves
-  it audible all night, and the next night too. Accepted, and re-affirmed after a reviewer pressed
-  the point: a shutdown handler covers only graceful exits, a hard crash or power cut bypasses it
-  entirely, and partial cover that looks like protection is worse than a known gap. The honest fix
-  is a device-side watchdog we do not have.
+- There is a wall panel. Someone may change the level by hand, and **the service never undoes
+  that**: nothing automatic moves the fan, so the panel and the API are two hands on the same
+  dial. A panel change is *visible* — `GET /api/unit/level` reads the unit live over Modbus —
+  but it is not recorded anywhere, because nothing polls the unit; the service log records what
+  the service was told, not what the panel did.
 
 **Known protocol details**, recovered from my earlier C# spikes in `~/RiderProjects/RecuControl`
 and `~/RiderProjects/DaphneControl` (both proven against the real unit):
@@ -256,27 +216,26 @@ framing, transaction ids, the register number and the ×10 encoding.
 `ReceiveTimeout` and `SendTimeout`, both of which govern an already-established stream, and left
 `TcpClient.Connect` unbounded — so the recovered "5 s" never covered connection setup in either
 codebase. An address that stops answering SYNs then blocks for the operating system's default,
-about 75 seconds per attempt, which with retries is minutes against a thirty-second control cycle.
-Confirmed by deleting the connect timeout and watching a test take exactly 75 seconds.
+about 75 seconds per attempt, which with retries is minutes against an API caller waiting for
+the answer. Confirmed by deleting the connect timeout and watching a test take exactly 75 seconds.
 
-**A fresh TCP connection per request**, rather than holding one open. At two requests every thirty
-seconds a persistent socket is state to manage — stale connections, reconnection, half-open
-detection — bought with nothing. The risk was that a cheap embedded stack accepts only one session
-and holds a dead one open; measured instead of assumed, on 2026-08-11: ten consecutive fresh
-connections completed in 6–11 ms each with no refusals, which is about a hundred times the rate
-this will ever run at.
+**A fresh TCP connection per request**, rather than holding one open. At the request rates this
+will ever see, a persistent socket is state to manage — stale connections, reconnection,
+half-open detection — bought with nothing. The risk was that a cheap embedded stack accepts only
+one session and holds a dead one open; measured instead of assumed, on 2026-08-11: ten
+consecutive fresh connections completed in 6–11 ms each with no refusals.
 
 **The five seconds is one budget per attempt, not one per phase.** Connecting spends from the same
-clock as waiting for the answer, so an attempt cannot quietly cost double — which matters because
-a tick makes up to two of these and has thirty seconds to do it in.
+clock as waiting for the answer, so an attempt cannot quietly cost double — and the caller on the
+other end of the API is waiting the whole time.
 
 **250 ms between attempts** is not invented either: NModbus, which the spike used, waited that long
 by default, so it is what the field-proven behaviour actually included. Reconnecting the instant a
 device refuses you is the least likely attempt to succeed, and four of them inside a millisecond is
 one attempt wearing a disguise.
 
-Because FC3 reads back successfully, **the current level is observable**. `/api/state` reports
-desired and actual separately, and a mismatch means someone used the wall panel.
+Because FC3 reads back successfully, **the current level is observable**. `GET /api/unit/level`
+reads it live, which is how a wall-panel change stays visible.
 
 Because the readable range and the commandable range genuinely differ, they are two types:
 
@@ -290,11 +249,10 @@ export type CommandedLevel = 20 | 30 | 40 | 50 | 60 | 70 | 80;
 
 `CommandedLevel` is assignable to `Level` with no conversion, so `VentilationUnit.read()` returns
 `Level` and `set()` accepts only `CommandedLevel`. **Commanding 90 is then a compile error, not a
-runtime check that someone has to remember to write.** The ceiling is also a named constant,
-`MAX_COMMANDED_LEVEL`, for the places that need it as a value rather than a type.
+runtime check that someone has to remember to write.**
 
-Both are plain literal unions — anything arriving from outside (config, a Modbus read) goes
-through a narrowing function.
+Both are plain literal unions — anything arriving from outside (config, a Modbus read, a request
+body) goes through a narrowing function.
 
 ---
 
@@ -376,17 +334,11 @@ Never store a value in anything else. Conversion happens in the adapter, at the 
 only CO₂ drives the unit. Collection is the point of the system — do not "optimise" the unused
 kinds away.
 
-**There is no state table.** The controller's working state — last commanded level, when it last
-changed, whether the previous cycle was asleep — lives in memory and is lost on restart. A restart
-therefore acts immediately rather than waiting out a dwell period.
-
-An earlier revision persisted the last change in a `control_state` table, on the grounds that a
-crash loop would otherwise make one change per restart instead of one per ten minutes. The table
-came with a clamp on read (a future timestamp made the dwell never expire), and a rule that an
-unreadable row is an error rather than a first run — two guards protecting one guard. **All three
-are removed.** The database is now append-only with no mutable row in it at all, which is a
-property worth more than the failure mode it gives up. A service that crash-loops is a problem to
-fix, not a problem to rate-limit.
+**Every table is append-only. There is no mutable row in the database at all.** A row is a fact
+about a point in time, written once; nothing in the file can be half-updated, and any backup of
+it is consistent by construction. The property is load-bearing: the one thing that genuinely
+must mutate — the Netatmo refresh token — lives in a file precisely so the database does not
+have to give this up (see "Configuration").
 
 ## The service log — the second table, deliberately
 
@@ -414,10 +366,10 @@ the same database file. `GET /api/logs` serves it back.
   volume. When retention is built it is the easiest target there is, a plain DELETE below a
   cutoff with no rollup to wait for, and it joins the same six-month revisit.
 
-While the loop is parked, the log is also the durable record of when the fan level changed over
-the API — `"70% set over the API"` next to the CO₂ curve it explains, which is half the axis the
-calibration week needs. Wall-panel changes stay invisible here: nothing polls the unit while the
-loop is parked, so the log records what the service did and was told, not what the panel did.
+The log is also the durable record of when the fan level changed over the API — `"70% set over
+the API"` next to the CO₂ curve it explains, which is half the axis the measurement campaign
+needs (see "The automation comes later"). Wall-panel changes stay invisible here: nothing polls
+the unit, so the log records what the service did and was told, not what the panel did.
 
 ## Topology lives in config, not the database
 
@@ -510,7 +462,7 @@ idempotent at any age.
 
 **Built 2026-08-11**, with three decisions folded in as it landed:
 
-- **Q6 is decided as the plan recommended: one bad reading does not sink the batch.** The valid
+- **One bad reading does not sink the batch.** The valid
   readings land; each reject is reported with its index and reason. A node cannot fix a bad
   reading by resending it, so failing the batch holds eight good readings hostage to one bad
   one, forever. For the same reason the response is **200 whenever the batch was processed**,
@@ -532,12 +484,12 @@ Two views of the same data, and one rule shared between them.
 
 | Endpoint | Shape |
 |---|---|
-| `GET /api/state` | **Room-level.** One value per `(room, kind)`, each naming its source and freshness. The control block is parked with the loop and returns with it. |
+| `GET /api/state` | **Room-level.** One value per `(room, kind)`, each naming its source and freshness. |
 | `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config, inactive ones included, `?from=&to=` as ISO 8601 (default last 24 h), `?kind=` to filter. |
 | `GET /api/sensors` | The config topology, so a client can interpret ids without reading files. |
 | `GET /api/sensors/:id/readings` | Per-instrument detail, when you want to see the raw instrument. |
 | `GET /api/logs` | The service log — the same lines stdout gets, `?from=&to=` as ISO 8601 (default last 24 h). Level-less and append-only; see "The service log" in the data-model section. |
-| `GET /api/unit/level` | The fan's actual level, read live over Modbus. This is how a wall-panel change stays visible while the loop's read-every-tick is parked. |
+| `GET /api/unit/level` | The fan's actual level, read live over Modbus — how a wall-panel change stays visible. |
 | `POST /api/unit/level` | Sets the fan. `assertCommandedLevel` refuses 90 and 100. **Deliberately unauthenticated** — see below. |
 | `POST /api/readings` | Batch ingest for the push nodes: a JSON array of readings, each with its own ISO 8601 `measuredAt`. Future rejected beyond 5 min of skew, any past accepted, replay idempotent. **Also unauthenticated** — same decision below. |
 | `GET /auth/netatmo` (+ `/callback`) | Netatmo OAuth onboarding, so no token is ever pasted by hand. |
@@ -562,9 +514,9 @@ you have to go and paste somewhere to understand.
   a decision, not an accident.
 - **A zone-less timestamp is refused**, not guessed at. `Date.parse` reads `2026-08-12T09:36:00`
   as the *host's* local time, so the same request would mean different instants on the server and
-  on the laptop that sent it, and would shift by an hour twice a year besides — the machine
-  dependence quiet hours already refuses. A bare date is refused for the same reason a second
-  grammar is: one rule, spelled out in the error.
+  on the laptop that sent it, and would shift by an hour twice a year besides — exactly the
+  machine dependence `TIME_ZONE` exists to refuse. A bare date is refused for the same reason a
+  second grammar is: one rule, spelled out in the error.
 - **A date that does not exist is refused.** Temporal refuses `2026-02-31` outright. The first
   build had to rebuild the date by hand because `Date.parse` silently rolls an impossible day
   forward into March; that guard is deleted, and the tests keep pinning the rejections so a
@@ -589,22 +541,23 @@ knowingly, and the full argument for keeping it was on the table when it went:
 
 - For the **fan endpoint**, the residual attacker on a trusted LAN is a web page inside
   someone's browser — CSRF, which a `text/plain` form body gets past JSON-only parsing, with
-  browser private-network blocking only partial — and while the loop is parked nothing pulls a
-  hostile 80 back down. What decided it anyway: everything such a caller can do is bounded by
-  construction — 20 to 80, never off, never above the grille ceiling — so the harm ceiling is a
-  noisy night, accepted by the person who sleeps there.
+  browser private-network blocking only partial — and nothing pulls a hostile 80 back down.
+  What decided it anyway: everything such a caller can do is bounded by construction — 20 to
+  80, never off, never above the grille ceiling — so the harm ceiling is a noisy night,
+  accepted by the person who sleeps there.
 - The **ingest endpoint** carries the sharper risk of the two, named before it went: a poisoned
-  reading outlives its request — it sits in the store, skews history and the calibration week —
-  and once the loop is rewired, invented bedroom CO₂ steers the fan from anything on the
-  network. Accepted with the same posture, same bounded actuator underneath.
+  reading outlives its request — it sits in the store, skews history and the measurement
+  campaign — and the day an automation drives the fan from CO₂, invented bedroom readings
+  steer it from anything on the network. Accepted with the same posture, same bounded actuator
+  underneath.
 
 If exposure ever grows beyond the LAN or tailnet, auth returns **at the edge** (a tunnel with
 SSO in front of the whole service), not inside this process. There is no `INGEST_TOKEN`; the
 SEN66 nodes will POST bare JSON.
 
-**The room-level view resolves its value with the same precedence function the controller uses.**
-One implementation, two consumers. The dashboard therefore always shows what the controller is
-actually seeing, and the two disagreeing is impossible by construction rather than by discipline.
+**Room-level values are resolved by one precedence function**, `domain/precedence.ts`. Every
+consumer, present and future — the dashboard, an automation — reads through the same rule, so
+two views disagreeing is impossible by construction rather than by discipline.
 
 Each room-level value reports **which sensor it came from and how fresh it is**. The general
 overview only needs "bedroom temperature", but the moment a number looks wrong the first question
@@ -620,26 +573,25 @@ differently because they are next to different radiators, and a mean describes n
 src/
   config.ts             SOLE source of truth for topology: rooms, sensors
                         (with isActive), per-(room, kind) precedence, freshness
-                        windows, thresholds — all `as const`. RoomId and SensorId
-                        are derived from it, so a typo is a compile error.
+                        windows — all `as const`. RoomId and SensorId are
+                        derived from it, so a typo is a compile error.
   domain/
     measurement.ts      MeasurementKind, Reading
-    level.ts            Level, CommandedLevel, narrowing, one step up/down
+    level.ts            Level, CommandedLevel, narrowing
     signal.ts           RoomSignal — fresh | stale | missing
-    decision.ts         Snapshot, Decision, ControlOutcome
+    freshness.ts        PURE. reading + now + per-source window -> RoomSignal
     time.ts             PURE. the ISO 8601 the API speaks <-> the
                         Temporal.Instant the domain carries. Two functions;
                         the store's epoch-ms columns convert inside store/,
                         at the SQL boundary.
     precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
-                        Shared by the controller and /api/state — one rule.
+                        The one rule for what a room currently says.
   sources/
     source.ts           SensorSource interface
     synthetic.ts        plausible CO₂ curves on a schedule, so `npm start` runs
-                        without hardware. A demo, not a plant model. Never runs
+                        without hardware. A demo, not a simulation. Never runs
                         beside a real source — same source ids, real database.
-    collector.ts        poll -> store, each source on its own cadence. The
-                        loop's first step, extracted while the loop is parked.
+    collector.ts        poll -> store, each source on its own cadence.
     netatmo.ts          pull adapter: OAuth refresh, gethomecoachsdata.
                         fetch is injected the way OpenStream is in modbus-tcp.
     netatmo-token.ts    the rotating refresh token, as a file on disk —
@@ -654,15 +606,6 @@ src/
                         table, and the whole of why it exists is in the
                         data-model section.
     readings.ts         node:sqlite; append-only, no pruning path exists yet.
-  control/              policy, limiter and the loop are PARKED — built, tested,
-                        not wired; see the section up top. freshness stays live:
-                        /api/state judges readings through it via precedence.
-    freshness.ts        PURE. reading + now + per-source window -> RoomSignal
-    policy.ts           PURE. snapshot -> desired Level + sleeping + reasons
-    limiter.ts          PURE. decision + current + last-change -> ControlOutcome
-    loop.ts             orchestration: poll -> store -> decide -> actuate.
-                        Owns the only mutable state there is, and exposes the
-                        last decision through state() for /api/state.
   actuator/
     unit.ts             VentilationUnit interface
     modbus-tcp.ts       real implementation, FC3 + FC6
@@ -676,291 +619,29 @@ src/
 tests/
 ```
 
-**`precedence.ts`, `freshness.ts`, `policy.ts` and `limiter.ts` are pure and contain all the
-interesting reasoning.** No IO, no clock reads, no database. Time arrives as a parameter. This is
-what makes the control logic testable without hardware, and it is the part of the codebase a
-reviewer should spend their time in.
+**`precedence.ts`, `freshness.ts` and `time.ts` are pure and contain the interesting
+reasoning.** No IO, no clock reads, no database. Time arrives as a parameter, which is what
+makes them testable without hardware, and they are where a reviewer should start.
 
 `main.ts` does wiring and nothing else.
 
 ---
 
-## The control logic
-
-Runs on a loop. Sensors are polled on their own cadences; the control decision is evaluated every
-30 seconds.
-
-Pipeline, in order:
-
-1. **Snapshot.** For each room, the CO₂ reading from the **highest-precedence source that is
-   fresh**, tagged with its freshness. Precedence is config, per `(room, kind)`: once a SEN66 is
-   installed it outranks the Netatmo in that room, and the Netatmo is only consulted while the
-   SEN66 is stale or absent. Never average two instruments — they have different calibration and
-   latency, and a blended number belongs to neither.
-
-   **When every source is stale, report the most recently measured one** (Q3). Precedence encodes
-   trust, and trust is what matters while a choice between *live* instruments exists. Once nothing
-   is fresh there is no such choice, only the question of what the best remaining information is —
-   and that is the newest reading, not the most trusted dead one.
-2. **Sleep detection. Quiet hours assert it; bedroom CO₂ only extends it.**
-
-   ```
-   sleeping = inQuietHours(now) || (wasSleeping && bedroomCo2 is fresh && bedroomCo2 > SLEEP_CO2)
-   ```
-
-   `wasSleeping` is the previous cycle's value, held in memory. Nothing else asserts sleep.
-
-   **Why the CO₂ term is an extender and not an assertion.** Asserting on CO₂ alone self-latches.
-   The band puts level 50 at roughly 900 ppm, so *any* CO₂ high enough to demand more than 50 has
-   already crossed 700 and capped the response at 50 — the demand signal and the occupancy signal
-   are the same number, and the one silences the other. With the bedroom door open, an ordinary
-   busy evening drives bedroom CO₂ past 700 with nobody in bed, and the flat is then pinned at 50
-   with no way to earn its way out. As an extender the term cannot false-trigger, because it
-   requires having already been asleep.
-
-   **What the term is for**, and it is worth keeping for exactly this: the cap must lift when the
-   room clears, not when the clock strikes. Keyed to the clock alone, the level would jump at
-   07:00 into a bedroom where people are still asleep. Two independent reviewers found that
-   regression by reasoning, and it is the one behaviour the scripted traces exist to pin.
-
-   The bedroom is never merely occupied in this flat — nobody sits in it — which is what makes
-   CO₂ readable as *still asleep* at all. That is a fact about this flat, not a general principle.
-   If the room's use changes, delete the clause.
-
-   **Two accepted losses, both consequences of the extender form:**
-   - **An afternoon nap gets no cap.** Sleep was not already asserted, so nothing extends. Someone
-     napping at 15:00 can hear the unit at up to 80.
-   - **A restart while asleep after 07:00 drops the cap.** `wasSleeping` starts false, quiet hours
-     have ended, so the extender cannot re-latch until 22:00.
-
-   Quiet hours is the sensor-independent guarantee underneath all of this: a dead Netatmo can
-   never let the unit run loud at 3am, because that path does not consult a sensor at all.
-
-   The open-window case is not covered either — someone asleep with the window open clears below
-   700 and loses the cap. Accepted: an open window already admits more noise than the unit makes.
-3. **Demand — a proportional band.** Highest fresh CO₂ across all rooms drives the target; worst
-   room wins. Stale and missing readings are excluded entirely, **in both directions**: a stale low
-   reading is never treated as good air, and a stale high one never pins the unit at the ceiling.
-
-   ```
-   frac   = clamp((co2 - C_LO) / (C_HI - C_LO), 0, 1)
-   target = quantise(MIN_LEVEL + frac * (MAX_COMMANDED_LEVEL - MIN_LEVEL))
-   ```
-
-   with `C_LO = 550`, `C_HI = 1250`. A straight line from 20% at 550 ppm to 80% at 1250, quantised
-   to the seven legal steps. No integral term, no accumulated state.
-4. **No fresh CO₂ anywhere** → fall back to `safeDefaultLevel` (config, default 40). Moderate
-   continuous ventilation is the safe answer when blind: quieter than boosting, safer than idling.
-   **Never fall back to the minimum.**
-5. **Hysteresis at each step boundary.** To move up, CO₂ must be `CO2_HYSTERESIS` (60 ppm) past the
-   boundary; to move down, the same below it. Implemented by biasing the reading in the direction
-   of travel and re-quantising, rather than as a separate state machine.
-
-   This replaces an earlier "boost above 800, release below 650" band, which was a *binary*
-   trigger dressed as a deadband and contradicted the proportional curve specified two lines
-   above it. One mechanism now, not two.
-6. **Sleep cap.** The whole cap lives in `limiter.ts`, in one place, and it is applied to **where
-   the unit is**, not only to a newly computed target:
-
-   ```
-   cap    = sleeping ? sleepMaxLevel : MAX_COMMANDED_LEVEL
-   if current > cap  -> command cap now, in one move
-   target = min(desired, cap)
-   ```
-
-   Three properties, all of which matter:
-   - **`policy.ts` never applies the cap.** It reports demand and whether we are asleep, and the
-     limiter clamps. One rule, one place — a cap applied in both modules is two mechanisms that
-     have to agree.
-   - **It bypasses the rate limit.** A unit at 70 when quiet hours begin drops to 50 immediately,
-     in one move. Evening cooking leaving it at 70 must not run all night because demand sat
-     mid-range and produced no new target. A hard requirement does not wait on a rate limiter.
-   - **It does not update `lastChangeAt`.** Otherwise the drop at 22:00 also starts a fresh dwell,
-     and the genuine walk down that follows it is delayed by ten minutes for no reason.
-7. **Rate limit — asymmetric. Only decreases are limited.**
-   - **Increases apply immediately, at any distance.** Demand at 80 from a current 20 commands 80
-     on that cycle.
-   - **Decreases move one step per `minDwell` (10 min).** The slow retreat is what stops
-     CO₂ crashing and rebounding into the next boost, and it is the damper that keeps a
-     mis-sized band degrading into slow drift rather than a square wave.
-   - The sleep cap in step 6 is **not** a decrease for this purpose. It is immediate and unlimited.
-
-   **This is the only timing rule in the controller.** An earlier revision had two — a dwell that
-   gated every change, plus a separate one-step-per-90s limit on increases — and they overlapped
-   on the down side while contradicting each other on the up side. There is now one clock:
-   *how long since the level last changed*, consulted only when going down.
-
-   Bounding increases was argued for on noise grounds: a step change in fan speed is more
-   noticeable than a ramp to the same level. That is true and it is given up knowingly. It bought
-   a four-and-a-half-minute climb from 20 to 80 at the cost of a second timer, a second config
-   value, and a rule that reads as symmetric while behaving asymmetrically. **Up is the direction
-   where the air is already bad**; making it wait is the wrong instinct even when it is quieter.
-   If the ramp turns out to be audibly necessary, it comes back as one line in the limiter —
-   not as a second timing concept.
-
-   What must *not* come back is the version with no limit in either direction. With only an input
-   deadband, demand crossing 800 slammed 20 → 80, the unit pulled CO₂ under 650 inside one dwell,
-   and it slammed back to 20 — a square wave with roughly a twenty-minute period, which is
-   precisely the behaviour this project exists to eliminate. The one-step-per-dwell *decrease* is
-   what kills that, and it is retained.
-
-   The confusion that produced that gap is worth recording, because the two rules sound alike and
-   are opposites: *"must differ by more than one step to change at all"* creates a dead zone and
-   was rightly removed (Q2); *"may move at most one step per change"* is rate limiting and is what
-   was actually needed. Removing the first was mistaken for having the second.
-
-   **The decrease interval must be at least as long as the slowest CO₂ source's refresh
-   interval.** Netatmo updates every 7–8 minutes, so anything shorter would step down again before
-   the effect of the last step could possibly be observed. Ten minutes satisfies this; it is a
-   constraint, not a coincidence, and it moves if the sensor fleet does.
-
-   **The timer is in memory and resets on restart.** A restart therefore acts immediately, which
-   is also what a genuine first run does (Q4). See "Data model" for why the table that used to
-   persist it is gone.
-8. **Clamp** to a valid `CommandedLevel` — floor 20, ceiling `MAX_COMMANDED_LEVEL` (80). The type
-   does this at compile time; `assertCommandedLevel` does it at runtime for anything crossing a
-   boundary, because type stripping performs no checking at all.
-9. **Read the unit's actual level back every tick** (FC3, already verified). It is surfaced next to
-   the desired level in `/api/state` and logged when the two disagree, which is how a wall-panel
-   change becomes visible.
-
-   **It is acted on in one case only:** if the unit is above `sleepMaxLevel` while sleep is
-   asserted, that level is passed to the limiter in place of our own, and step 6's cap path pulls
-   it back in one move. Everything else is reported and left alone. See the actuator section for
-   why this is the position rather than always or never.
-
-**On steps 3, 5 and 7 together:** the band's *width* sets the loop gain and is what makes
-convergence provable; hysteresis stops boundary chatter; the one-step-per-dwell decrease stops the
-swing and is the backstop if the band turns out too narrow. The band is doing the real work.
-
-## Why this control law, in plain terms
-
-Written out because it has to be explained aloud, and the vocabulary is worse than the idea.
-
-**The proportional band** is a straight line: 20% at 550 ppm, 80% at 1250 ppm, read off the line
-in between. The 700 ppm span is the "band". A wider band means a gentler reaction to the same
-change in CO₂.
-
-**The failure it prevents, without the maths.** It is a shower with a long pipe. The water is
-cold, so you turn the tap up hard. Nothing happens — the pipe is long — so you turn it further.
-Then scalding water arrives and you crank it back. Freezing again. You weave between extremes, and
-the harder you react the worse it gets.
-
-Two fixes, and they are the two things in this controller: **smaller adjustments per unit of
-wrongness** (that is the band width) and **wait before adjusting again** (that is dwell).
-
-In one sentence: **if the fan reacts more strongly than its own action changes things, it chases
-its own tail.**
-
-**How wide is wide enough.** The fan can only hold CO₂ somewhere between a floor (at level 80) and
-a ceiling (at level 20). That span is its *authority*. A band narrower than the authority means
-driving the fan end to end moves CO₂ further than the band covers, so it slams between extremes.
-
-> **The band must be at least as wide as the CO₂ swing the fan can actually produce.**
-
-Worked illustration, using *assumed* airflow of 80 m³/h at level 20 and 260 at level 80, four
-occupants. Start deliberately wrong at level 70:
-
-| Fan at | CO₂ settles at | Line says |
-|---|---|---|
-| 70 | 746 | 37 |
-| 37 | 1010 | 58 |
-| 58 | 810 | 42 |
-| 42 | 940 | 53 |
-| 53 | 840 | 45 |
-| 45 | 900 | 50 |
-| 50 | 861 | 47 |
-| | | ≈ **48**, settled |
-
-Each swing is smaller than the last. That ratio — fan movement against CO₂ movement — is the
-**loop gain**; here it is 0.72. Below 1 converges, above 1 grows into oscillation.
-
-**Read that table as an illustration of the mechanism, not as a measurement of this flat.** See
-the next section for what is actually known.
-
-This is also why the commercial 200 ppm band does not transfer. An office VAV damper has enormous
-airflow authority relative to its zone, so one step barely moves CO₂. A restricted HRV in a small
-flat moves it a lot, and at 200 ppm the loop gain here would be several times 1 — a guaranteed
-limit cycle with roughly an hour period.
-
-## What is actually known about this flat, and what is not
-
-**Flat volume does not affect the band.** Steady-state CO₂ is `outdoor + generation ÷ airflow`;
-volume does not appear. 58 m² × 2.55 m ≈ **148 m³** sets how *fast* the room responds — a time
-constant of roughly 35 minutes to 3 hours depending on level — not where it settles. An earlier
-revision cited a 200 m³ figure as though it mattered to the band. It never did.
-
-**What does matter is the airflow range and the occupancy**, and occupancy dominates. The unit is
-a **2VV Daphne HRDA2-030**, nominally around 300 m³/h — but that is a test-rig figure at zero
-external pressure. Real ducting plus the restricted intake grille could plausibly halve it, and
-nobody has measured it.
-
-Authority across the plausible corners:
-
-| | 2 people | 4 people |
-|---|---|---|
-| Optimistic install (70 → 220 m³/h) | ~350 ppm | ~690 ppm |
-| Restricted install (45 → 140 m³/h) | ~540 ppm | ~1070 ppm |
-
-**So authority is somewhere between roughly 350 and 1100 ppm, and the 700 ppm band sits in the
-middle of that range.** At the restricted-install, four-occupant corner the pure loop gain would
-be about 1.5 — the hunting condition.
-
-**Why that is tolerable rather than alarming.** The loop-gain argument assumes the controller
-jumps straight to its computed target each round. This one cannot: decreases move one step per
-dwell. That rate limit is a damper the gain analysis does not model, so where the band turns out
-too narrow the failure degrades into slow drift with mild overshoot rather than a square wave.
-The band handles stability when it is sized right; the rate limiter is the backstop when it is not.
-
-**How this gets resolved properly.** Two steps, in order:
-
-1. **Ship the estimate and instrument it.** The band is a middle bet across that range. Scripted
-   trace tests cover the controller's *sequence* behaviour, which needs no plant parameters at all;
-   convergence is the one question they cannot answer, and it is the one question that genuinely
-   needs the plant measured.
-2. **Measure it after a week of logs.** CO₂ settling points at several levels give real airflow and
-   real authority, the band is recomputed from observation, and a calibrated plant model becomes
-   worth building. Every assumption above then drops out.
-
-   Sweeping a simulator across guessed corners was considered and rejected: it would prove the
-   controller settles in an imaginary flat, which is easy to mistake for validation.
-
-If the restricted corner turns out to be real, four people may keep CO₂ above ~900 ppm even at
-level 80. The unit will sit pinned at the ceiling, and that is correct behaviour — a capacity
-problem, not a control one, which is what the pinned-at-ceiling diagnostic exists to surface.
-
-**Droop is intentional.** The unit settles wherever ventilation balances CO₂ production — inside
-the band, not at a target number. ASHRAE's framing is that CO₂ is a **limit, not a setpoint**:
-maximum ventilation when CO₂ reaches the maximum, proportionally less below. Chasing an exact
-value is what an integral term does, and here it would solve a non-problem while winding itself up
-on Netatmo's repeated readings.
-
-**Provenance.** This is ASHRAE Guideline 36's P-only DCV sequence with Trim-and-Respond-style
-asymmetry, not something invented here. Guideline 36 Addendum q (2024) specifies P-only for CO₂
-and states the reason: CO₂ is a limit to stay under, not a value to oscillate around. Hysteresis
-of 50–100 ppm at switching points is standard practice (Honeywell Jade uses 100). The one place
-this design departs from commercial convention is band width, for the reason set out above.
-
-**Every decision carries its reasoning.** `ControlOutcome` includes the reasons that produced it,
-and those surface in `/api/state` and the logs. A decision you cannot explain after the fact is a
-decision you cannot debug.
-
----
-
 ## Growth without a framework
 
-More automations are coming, and a dashboard will be built on this. Neither justifies
+Automations are coming, and a dashboard will be built on this. Neither justifies
 infrastructure now.
 
 The seams that make growth additive already exist:
 
-- `policy.ts` is `(snapshot, now) => decision`. A second automation is a second pure function.
+- An automation is a pure function over a snapshot of readings and a timestamp. The first one
+  will be exactly that when its data exists; a second is a second function.
 - Actuators sit behind an interface. A second device is a second adapter.
 - Readings are `(source, room, kind, value, time)`. A new sensor is config plus an adapter.
 - The store answers range queries. A dashboard is a read endpoint, not a schema change.
 
-So: **no rule engine, no plugin loader, no automation registry, no event bus.** When the second
-automation arrives, write the second function. If a third and fourth follow and a real pattern
+So: **no rule engine, no plugin loader, no automation registry, no event bus.** When an
+automation arrives, write the function. If a third and fourth follow and a real pattern
 emerges, abstract *then*, against evidence.
 
 A reviewer has twenty minutes and wants to read one thing that works — not scaffolding for five
@@ -968,45 +649,15 @@ things that do not.
 
 ## Testing
 
-**Full case list: [`docs/test-plan.md`](docs/test-plan.md).** Written before the implementation,
-Q1–Q4 are decided and folded into the control logic above. Q6 concerns only the ingest endpoint
-and is deferred with it.
+**Full case list: [`docs/test-plan.md`](docs/test-plan.md)** — written before the
+implementation, module by module, and kept current as modules land.
 
-The plan also records **F1–F6**, the findings from an independent review run before any code
-existed — two agents, one given only the requirements, one given the decisions with all reasoning
-stripped. Three of the six changed the control logic materially, and one of those was fatal.
-
-The pure modules are written **test-first** — `freshness`, `precedence`, `policy`, `limiter`.
-Adapters are tested after, against fakes, because their shape is not knowable until the real
-protocol has been spoken.
-
-**Some tests are traces.** A hand-written series of `(minute, co2)` pairs plus a clock, fed to
-**the real control loop** — through a real source, a real SQLite store and the recording fake unit
-— asserting on the *sequence* of commands rather than on one decision. No physics: it says "here
-is a CO₂ trace, here is what the service does". That is what catches bugs which only exist across
-time — the cap releasing too early, a square wave, flutter at a step boundary.
-
-**The harness drives `createControlLoop` rather than calling `policy` and `limiter` itself**, and
-that is not a detail. An earlier version threaded `currentLevel`, `lastChangeAt` and `wasSleeping`
-in the test file, which made it a second copy of the loop's state machine — one that stayed green
-while the real one was broken. The overnight trace exists to catch the 07:00 regression and did
-not notice when the loop stopped carrying `wasSleeping` at all. **Wiring that the tests
-re-implement is wiring that is not tested.**
-
-Driving the real loop also means the fake unit is right there, so a trace can make writes fail for
-an hour and see what the loop does across the outage. That is what pins the loop's update
-ordering, which nothing else can reach.
-
-**A closed-loop plant model is deliberately deferred**, not omitted. It would answer whether the
-loop converges, which a scripted trace structurally cannot. But every parameter it needs — airflow
-per level, each room's share, transfer through open doors — is currently a guess, so it would
-prove the controller settles in an imaginary flat. Its precondition is a week of logged settling
-points. Build it then, with the band recomputation it enables. See `docs/test-plan.md`.
+The pure modules are written **test-first** — `freshness`, `precedence`, `time`. Adapters are
+tested after, against fakes, because their shape is not knowable until the real protocol has
+been spoken.
 
 `node:test` + `node:assert/strict`. No framework.
 
-- **The pure core is tested directly** — `policy.ts` and `limiter.ts` take a snapshot and a
-  timestamp and return a decision. Table-driven cases.
 - **Time is injected**, never read from a clock inside logic. `now` arrives as a
   `Temporal.Instant` parameter; only `main.ts` calls `Temporal.Now.instant()`.
 - **Instants and `deepEqual` do not mix.** A `Temporal.Instant` keeps its state in internal
@@ -1021,34 +672,39 @@ points. Build it then, with the band recomputation it enables. See `docs/test-pl
   checking nothing.
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings.
-- **The cases that matter** are the failure ones: sensor goes stale mid-run, Netatmo unreachable,
-  all sensors dead, CO₂ hovering exactly on a threshold, quiet hours boundary, dwell boundary,
-  Modbus write times out.
+- **The cases that matter** are the failure ones: a sensor going stale mid-run, Netatmo
+  unreachable, a reading exactly on a freshness boundary, a Modbus write timing out, a batch
+  with one poisoned reading.
 
-A reviewer should be able to read the policy tests alone and understand what the system does.
+A reviewer should be able to read the precedence and ingest tests alone and understand what the
+system promises.
 
 ---
 
 ## Configuration
 
-`config.ts` is the sole source of truth for both **topology** (rooms; sensors with their room,
-kinds, `isActive` flag and freshness window; per-`(room, kind)` precedence order) and **tuning**
-(thresholds, quiet hours, dwell). All `as const`, so ids are literal union types and a typo is a
-compile error. Every time span in it — freshness windows, the dwell, the evaluation interval —
-is a `Temporal.Duration` (2026-08-12), so the unit travels with the type instead of living in an
-`Ms` suffix, and a window cannot be handed where a threshold was meant. Spans become numbers
-again only at the platform's door — `setTimeout`, `AbortSignal.timeout` — one `total()` call at
-the top of the module that owns the timer.
+`config.ts` is the sole source of truth for **topology**: rooms; sensors with their room, kinds,
+`isActive` flag and freshness window; per-`(room, kind)` precedence order. All `as const`, so
+ids are literal union types and a typo is a compile error. Every time span in it — the freshness
+windows, the poll intervals — is a `Temporal.Duration` (2026-08-12), so the unit travels with
+the type instead of living in an `Ms` suffix. Spans become numbers again only at the platform's
+door — `setTimeout`, `AbortSignal.timeout` — one `total()` call at the top of the module that
+owns the timer.
 
-Secrets — Tado and Netatmo OAuth, the Modbus host, the ingest token — come from environment
-variables and are never committed. One secret cannot live there:
+It also carries **`TIME_ZONE`**, the flat's IANA zone (`Europe/Prague`): anything that needs a
+local hour reads it from there, so behaviour never depends on how the host's clock is configured
+and never shifts by an hour twice a year if the host is ever UTC. Temporal handles the DST
+transitions; a fixed offset would not.
+
+Secrets — Tado and Netatmo OAuth, the Modbus host — come from environment variables and are
+never committed. One secret cannot live there:
 
 **The Netatmo refresh token lives in a file** (`data/netatmo-token.json`, `NETATMO_TOKEN_PATH`
 to move it), because Netatmo **rotates** it on every refresh — the reference worker observed
 this live against this device, it is not caution. Something mutable has to hold the current one,
 and the two other candidates lose: an environment variable cannot be rewritten by a running
-process, and the database gave up its last mutable row on purpose when `control_state` was cut —
-a credentials row would quietly re-spend that, and would put a live secret inside every database
+process, and the database is append-only with no mutable row in it, on purpose — a credentials
+row would quietly spend that property, and would put a live secret inside every database
 backup besides. The file is written atomically (temp + rename, mode 0600), the new token is
 persisted **before** the new access token is used (a crash in between must cost a poll, not the
 credential), and the adapter re-reads the file on every refresh, so a re-authorisation through
@@ -1066,67 +722,15 @@ up to one vendor refresh (≤ 8 min) old when fetched, plus up to one poll inter
 the next fetch. Against the 15-minute freshness window the interval must stay under 7 minutes,
 or a healthy instrument periodically reads as stale through our own polling.
 
-Starting defaults, all to be tuned against reality:
+**Two numbers describe the world rather than configure the service: 20 and 80.** The floor is
+what the unit does; the ceiling is what the intake grille in this flat allows. They live in the
+`Level` and `CommandedLevel` types (see "The actuator") and change only if the hardware does.
 
-| Setting | Default | |
-|---|---|---|
-| `C_LO` — band bottom, level 20 | 550 ppm | **derived** |
-| `C_HI` — band top, level 80 | 1250 ppm | **derived** |
-| `CO2_HYSTERESIS` | 60 ppm | derived (≈ ½ step) |
-| `SLEEP_CO2` — bedroom, *extends* sleep | 700 ppm | tune |
-| Quiet hours, and the zone they are read in | 22:00–07:00, `Europe/Prague` | tune |
-| Sleep max level | 50 | tune |
-| Safe default level (no data) | 40 | tune |
-| `minDwell` — one step down | 10 minutes | tune, floor ≥ 8 min |
-| Control evaluation interval | 30 s | tune |
-| `MIN_LEVEL` | 20 | **physical** |
-| `MAX_COMMANDED_LEVEL` | 80 | **physical** |
-
-The last two are **not tuning knobs.** 20 is what the unit does; 80 is what the intake grille in
-this flat allows. Everything above is a preference to be adjusted against real readings; these two
-describe the world and should only change if the hardware does.
-
-**The band is sized by a rule, not tuned by feel** — but the number it produces is currently an
-estimate, not a measurement. `C_HI − C_LO` must be at least the CO₂ swing the unit can produce
-between level 20 and level 80 at design occupancy, or loop gain exceeds 1 and it hunts no matter
-how much hysteresis is added. That swing is somewhere between ~350 and ~1100 ppm for this flat
-(see "What is actually known" above), so 700 is a middle bet validated by a sensitivity sweep
-rather than a derived certainty. `C_HI = 1250` also matches EN 16798-1 Category II (800 ppm above
-outdoors). `CO2_HYSTERESIS` follows from the band: step width is 700/6 ≈ 117 ppm, and half a step
-is the conventional size.
-
-**Recompute the band from logged data once a week of readings exists.** Settling points at several
-levels give real airflow and real authority, which replaces every assumption behind the 700.
-
-**Minimum dwell has a floor**, not just a default: it may never be set below the slowest CO₂
-source's refresh interval (8 minutes for Netatmo). Below that the controller steps down again
-before it can observe the last step.
-
-**Quiet hours carry an explicit IANA time zone.** Reading the hour out of the host's local time
-would make the tests depend on the machine they run on, and would silently shift the night cap by
-an hour twice a year if the host were ever UTC. `Europe/Prague` is where the flat is; the
-conversion goes through `Intl.DateTimeFormat`, which handles the DST transitions for free.
-
-**One diagnostic, built:** CO₂ above `C_HI` + 10% for more than 10 minutes while pinned at the
-ceiling → log it. That is a capacity problem (or the intake grille), not something the controller
-can fix by trying harder, and ASHRAE Guideline 36 specifies it. It is the only piece of state in
-the loop that is not the control decision itself.
-
-**It repeats once per ten-minute window while the condition lasts**, and the ten minutes start
-again from the moment it clears. An earlier draft said "log it once", which is what an alarm does
-when it is trying not to be noisy — but this one is not noisy next to 120 decision lines an hour,
-and a single line eight hours ago does not tell you the flat is *still* out of capacity. Latching
-it would also have cost a second piece of state next to `pinnedSince` purely to remember that we
-had already spoken. One variable, and an alarm that behaves like an alarm.
-
-**One diagnostic, built with the ingest endpoint it belongs to:** any reading **below 300 ppm** is a
-probable calibration fault — NDIR sensors self-calibrate by assuming they periodically see outdoor
-air, and a flat that never gets down to outdoor CO₂ will drift, shifting the whole band. That is a
-check on readings as they arrive, so it belongs in the ingest endpoint, which is not built.
-
-`SLEEP_CO2` at 700 ppm rests on a fact about this flat — the bedroom is never merely occupied, so
-CO₂ above 700 there means someone is *still* asleep. It only extends a sleep that quiet hours
-already asserted; see the control logic for why it may not assert one on its own.
+**One diagnostic, built into the ingest endpoint:** any reading **below 300 ppm** is a probable
+calibration fault — NDIR sensors self-calibrate by assuming they periodically see outdoor air,
+and a flat that never gets down to outdoor CO₂ will drift, shifting every reading with it. It is
+logged, never rejected: a drifted instrument is still reporting real air with a shifted zero,
+and the low reading is the evidence of the fault.
 
 ---
 
@@ -1158,8 +762,7 @@ These are unresolved. Do not invent answers — ask.
 2. **Does the unit accept only multiples of 10, or does it round?** We only ever write valid
    `Level` values, so this is a curiosity rather than a risk — but worth knowing when reading
    back a level the wall panel set.
-3. **Exact CO₂ thresholds.** Defaults above are guesses and need tuning against real readings.
-4. **Push authentication — decided (2026-08-11): none.** Every endpoint is open on the trusted
+3. **Push authentication — decided (2026-08-11): none.** Every endpoint is open on the trusted
    LAN; the acceptance and its bounds are recorded in the read-API section. If exposure ever
    grows beyond the LAN or tailnet, auth arrives at the edge, in front of the whole service.
 
@@ -1169,6 +772,9 @@ These are unresolved. Do not invent answers — ask.
 
 Stated so the gaps read as decisions rather than omissions:
 
+- **The CO₂ automation.** Intended, previously implemented, removed until real data exists to
+  design it against — see "The automation comes later", which carries the pointer to the
+  implementation in git.
 - **Docker.** Comes later; the service runs on a home server eventually.
 - **Charts and UI.** JSON endpoints only. A dashboard adds hours and demonstrates nothing for a
   backend sample.

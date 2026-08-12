@@ -1,5 +1,5 @@
-import type { Reading } from '../domain/measurement.ts';
-import type { RoomSignal } from '../domain/signal.ts';
+import type { Reading } from './measurement.ts';
+import type { RoomSignal } from './signal.ts';
 
 /**
  * How much one reading is currently worth, judged against that instrument's own
@@ -15,8 +15,8 @@ export function toRoomSignal(
   if (reading === undefined) return { status: 'missing' };
 
   // On measuredAt, never receivedAt. A reading that arrived one second ago but
-  // was taken an hour ago is an hour old, and treating it as fresh is how a
-  // replayed backlog would drive the fan.
+  // was taken an hour ago is an hour old, and treating it as fresh would let a
+  // replayed backlog masquerade as the current state of the room.
   const staleAfter = reading.measuredAt.add(window);
 
   // A reading from the near future — clock skew between us and the instrument —

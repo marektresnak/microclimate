@@ -70,8 +70,8 @@ export interface ReadingStore {
 export function openReadingStore(path: string): ReadingStore {
   const database = new DatabaseSync(path);
 
-  // The control loop writes every thirty seconds while the read API will be
-  // serving queries from the same file. WAL is what stops one blocking the other.
+  // The collector writes every thirty seconds while the read API serves
+  // queries from the same file. WAL is what stops one blocking the other.
   database.exec('PRAGMA journal_mode = WAL');
   database.exec(SCHEMA);
 

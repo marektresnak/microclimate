@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { SENSORS } from '../src/config.ts';
-import { toRoomSignal } from '../src/control/freshness.ts';
+import { toRoomSignal } from '../src/domain/freshness.ts';
 import type { Reading } from '../src/domain/measurement.ts';
 import { assertDeepEqual } from './support/deep-equal.ts';
 
@@ -35,7 +35,7 @@ describe('freshness', () => {
   });
 
   it('carries the last value and its timestamp through staleness', () => {
-    // A stale reading is excluded from demand, but a dashboard showing
+    // A stale value is worth less, not nothing: a dashboard showing
     // "1100 ppm, 40 minutes ago" is telling you something a blank cannot.
     const measuredAt = NOW.subtract({ minutes: 40 });
     const signal = toRoomSignal(co2ReadingAt(measuredAt), NOW, WINDOW);

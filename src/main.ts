@@ -8,7 +8,6 @@ import { dirname } from 'node:path';
 import { createFakeUnit } from './actuator/fake.ts';
 import { createModbusUnit } from './actuator/modbus-tcp.ts';
 import type { VentilationUnit } from './actuator/unit.ts';
-import { CONTROL } from './config.ts';
 import { createApiServer } from './http/server.ts';
 import type { NetatmoAuthOptions } from './http/server.ts';
 import { createCollector } from './sources/collector.ts';
@@ -21,13 +20,11 @@ import { openReadingStore } from './store/readings.ts';
 
 // Wiring only. Every decision this file causes is made somewhere else.
 //
-// The control loop is deliberately NOT wired. It is built and tested —
-// src/control/, and the scripted traces that drive it — and parked: the band
-// cannot be validated before a stretch of real readings exists, so for now the
-// service collects and the fan is driven by hand, over the wall panel or POST
-// /api/unit/level. The collector below is the loop's polling step extracted;
-// when the loop returns it replaces the collector here, never runs beside it.
-// See CLAUDE.md, "The control loop is parked".
+// Nothing here moves the fan on its own. The service collects — sources →
+// store → API — and the level is set by hand, over the wall panel or POST
+// /api/unit/level. An automation that drives the fan from CO2 is intended
+// eventually, designed against the real readings this phase exists to gather.
+// See CLAUDE.md, "The automation comes later".
 
 // The five seconds is the spike's, and covers connecting as well as answering.
 // One retry, because the collector comes back around in thirty seconds anyway.
@@ -74,7 +71,7 @@ const netatmoTokenPath = process.env.NETATMO_TOKEN_PATH ?? './data/netatmo-token
 // the ceiling. `npm start` then demonstrates the whole service on any machine.
 function chooseUnit(): VentilationUnit {
   const host = envOrUndefined('HRV_MODBUS_HOST');
-  if (host === undefined) return createFakeUnit(CONTROL.safeDefaultLevel);
+  if (host === undefined) return createFakeUnit();
 
   return createModbusUnit({
     host,
@@ -102,8 +99,8 @@ const netatmoAuth: NetatmoAuthOptions | undefined =
 
 // Real credentials mean ONLY real sources. The synthetic Netatmo writes under
 // the same source_id as the real one, so mixing them would salt the database
-// with invented readings — and the week of logged settling points the band
-// recomputation waits for has to be real or it is worthless.
+// with invented readings — and the record of real air this phase exists to
+// gather has to be real or it is worthless.
 function chooseSources(): readonly SensorSource[] {
   if (netatmoAuth === undefined) return [createSyntheticNetatmo(), createSyntheticTado()];
 

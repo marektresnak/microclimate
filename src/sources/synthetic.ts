@@ -4,14 +4,12 @@ import type { MeasurementKind, Reading } from '../domain/measurement.ts';
 import type { SensorSource } from './source.ts';
 
 /**
- * Plausible curves on a schedule, so `npm start` runs and logs real decisions
+ * Plausible curves on a schedule, so `npm start` runs, collects and serves
  * without any hardware attached.
  *
- * **A demo, not a plant model.** Nothing here reacts to the fan, so it cannot
- * tell you whether the loop converges — that question needs a closed-loop model,
- * and every parameter such a model needs is currently a guess. See
- * `docs/test-plan.md`. What this does give you is a service you can start and
- * watch make decisions with their reasoning attached.
+ * **A demo, not a simulation of the flat.** The curves follow the clock and
+ * react to nothing — they exist so every endpoint has something real-shaped
+ * to say, not so anyone can draw conclusions from them.
  */
 interface DailyPoint {
   readonly hour: number;

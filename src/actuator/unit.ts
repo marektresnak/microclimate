@@ -1,7 +1,7 @@
 import type { CommandedLevel, Level } from '../domain/level.ts';
 
 /**
- * The HRV unit, behind the smallest interface that covers what the loop needs.
+ * The HRV unit, behind the smallest interface that covers what the service needs.
  *
  * The two methods use different types on purpose. `read` returns `Level`,
  * because someone can put the wall panel at 90 or 100 and refusing to represent

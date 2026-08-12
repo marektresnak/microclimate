@@ -66,7 +66,7 @@ describe('the synthetic sources', () => {
     }
   });
 
-  it('drives the bedroom above the sleep threshold overnight and clears it by lunchtime', async () => {
+  it('fills the bedroom with CO2 overnight and clears it by lunchtime', async () => {
     const night = await createSyntheticNetatmo().poll(Temporal.Instant.from('2026-01-15T03:00:00Z')); // 04:00 local
     const midday = await createSyntheticNetatmo().poll(Temporal.Instant.from('2026-01-15T12:00:00Z')); // 13:00 local
 

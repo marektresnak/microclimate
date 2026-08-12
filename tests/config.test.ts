@@ -1,46 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { CONTROL, PRECEDENCE, ROOM_IDS, SENSORS } from '../src/config.ts';
+import { PRECEDENCE, ROOM_IDS, SENSORS } from '../src/config.ts';
 import { MEASUREMENT_KINDS } from '../src/domain/measurement.ts';
-
-describe('the band, which is the number that decides whether the loop settles', () => {
-  // The band must be at least as wide as the CO2 swing the fan can itself
-  // produce, or loop gain exceeds 1 and it hunts however much hysteresis is
-  // added. Nobody has measured that swing for this flat; the plausible range is
-  // 350-1100 ppm and 700 is a middle bet.
-  //
-  // This lives in a test rather than as a runtime check at config load because
-  // turning an estimate into an invariant means picking the number that makes
-  // the assertion pass. Here it records the current belief, and narrowing the
-  // band fails loudly with the reason attached.
-  const BELIEVED_FAN_AUTHORITY_PPM = 700;
-
-  it('is at least as wide as the fan authority we currently believe in', () => {
-    const width = CONTROL.bandHighPpm - CONTROL.bandLowPpm;
-    assert.ok(
-      width >= BELIEVED_FAN_AUTHORITY_PPM,
-      `band is ${width} ppm wide, below the ${BELIEVED_FAN_AUTHORITY_PPM} ppm the fan is believed to swing`,
-    );
-  });
-
-  it('has hysteresis smaller than one step, or no step is ever reachable', () => {
-    const stepWidth = (CONTROL.bandHighPpm - CONTROL.bandLowPpm) / 6;
-    assert.ok(
-      CONTROL.hysteresisPpm < stepWidth,
-      `hysteresis ${CONTROL.hysteresisPpm} ppm is not smaller than the ${stepWidth} ppm step`,
-    );
-  });
-});
-
-describe('the dwell floor', () => {
-  it('is never shorter than the slowest CO2 source refreshes', () => {
-    // Netatmo refreshes every 7-8 minutes on their side. Stepping down faster
-    // than that means acting again before the last step could be observed.
-    const slowestCo2Refresh = Temporal.Duration.from({ minutes: 8 });
-    assert.ok(Temporal.Duration.compare(CONTROL.minDwell, slowestCo2Refresh) >= 0);
-  });
-});
 
 describe('topology', () => {
   it('ranks every sensor for every kind it reports', () => {
@@ -106,8 +68,7 @@ describe('topology', () => {
 
   it('has no CO2 instrument outside the bedroom yet', () => {
     // Not an aspiration — a fact that shapes the tests. Living-room CO2 is
-    // genuinely `missing` until a SEN66 is installed, and the controller has
-    // exactly one instrument standing between it and the safe default.
+    // genuinely `missing` until a SEN66 is installed.
     assert.deepEqual(PRECEDENCE.living_room.co2, undefined);
     assert.deepEqual(PRECEDENCE.kids_room.co2, undefined);
     assert.deepEqual(PRECEDENCE.bedroom.co2, ['bedroom_netatmo']);

@@ -1,4 +1,3 @@
-import type { CommandedLevel } from './domain/level.ts';
 import type { MeasurementKind } from './domain/measurement.ts';
 
 // The sole source of truth for topology. There is no `rooms` or `sensors` table:
@@ -67,8 +66,7 @@ export const SENSORS = {
     isActive: true,
     freshnessWindow: TADO_FRESHNESS,
   },
-  // The only CO2 instrument in the flat today, which makes it the only thing
-  // between the controller and the safe default.
+  // The only CO2 instrument in the flat today.
   bedroom_netatmo: {
     room: 'bedroom',
     kinds: ['temperature', 'humidity', 'co2'],
@@ -115,69 +113,7 @@ export const PRECEDENCE: Record<RoomId, Partial<Record<MeasurementKind, readonly
   },
 };
 
-export interface ControlConfig {
-  readonly bandLowPpm: number;
-  readonly bandHighPpm: number;
-  readonly hysteresisPpm: number;
-  readonly sleepCo2Ppm: number;
-  readonly quietHoursStartHour: number;
-  readonly quietHoursEndHour: number;
-  readonly timeZone: string;
-  readonly sleepMaxLevel: CommandedLevel;
-  readonly safeDefaultLevel: CommandedLevel;
-  readonly minDwell: Temporal.Duration;
-  readonly evaluationInterval: Temporal.Duration;
-  readonly ceilingDiagnosticPpm: number;
-  readonly ceilingDiagnosticWindow: Temporal.Duration;
-}
-
-// The band bottom and top are named here because the ceiling diagnostic is
-// derived from the top, and two places holding 1250 is one place too many.
-const BAND_LOW_PPM = 550;
-const BAND_HIGH_PPM = 1250;
-
-/**
- * Tuning. Every number here is a preference to be adjusted against real
- * readings — unlike MIN_LEVEL and MAX_COMMANDED_LEVEL, which describe the world.
- *
- * The band width is the one that decides whether the loop settles or hunts: it
- * must be at least as wide as the CO2 swing the fan can itself produce, which
- * for this flat is somewhere between 350 and 1100 ppm and has never been
- * measured. 700 is a middle bet. Recompute it from a week of logged settling
- * points; the test suite pins the current belief so that narrowing it fails loudly.
- */
-export const CONTROL = {
-  bandLowPpm: BAND_LOW_PPM,
-  bandHighPpm: BAND_HIGH_PPM,
-  // Half a step: the band spans six steps, so a step is 700/6 ≈ 117 ppm.
-  // 50-100 ppm at switching points is standard practice.
-  hysteresisPpm: 60,
-
-  // Rests on a fact about this flat: nobody sits in the bedroom, so CO2 above
-  // this in that room means someone is still asleep. It only ever *extends* a
-  // sleep that quiet hours asserted — see policy.ts for why it may not assert one.
-  sleepCo2Ppm: 700,
-
-  quietHoursStartHour: 22,
-  quietHoursEndHour: 7,
-  // Explicit, so the night cap does not depend on the host's clock settings and
-  // does not shift by an hour twice a year if the host is ever UTC.
-  timeZone: 'Europe/Prague',
-
-  sleepMaxLevel: 50,
-  // When blind, ventilate moderately: quieter than boosting, safer than idling.
-  // Never fall back to the minimum.
-  safeDefaultLevel: 40,
-
-  // One step down per this interval. It may never be shorter than the slowest
-  // CO2 source's refresh (8 minutes for Netatmo), or the controller steps down
-  // again before it could observe the last step.
-  minDwell: Temporal.Duration.from({ minutes: 10 }),
-  evaluationInterval: Temporal.Duration.from({ seconds: 30 }),
-
-  // ASHRAE Guideline 36's pinned-at-the-ceiling alarm: this far above the band
-  // for this long, at full power, is a capacity problem and not something the
-  // controller can fix by trying harder.
-  ceilingDiagnosticPpm: BAND_HIGH_PPM * 1.1,
-  ceilingDiagnosticWindow: Temporal.Duration.from({ minutes: 10 }),
-} as const satisfies ControlConfig;
+// Where the flat is, as an explicit IANA zone. Anything that needs a local
+// hour reads it from here, so behaviour never depends on how the host's clock
+// is configured and never shifts by an hour twice a year if the host is UTC.
+export const TIME_ZONE = 'Europe/Prague';

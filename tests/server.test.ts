@@ -156,7 +156,7 @@ describe('the http server', () => {
     });
   });
 
-  it('serves room state that agrees with resolveSignal, the same rule the controller uses', async () => {
+  it('serves room state that agrees with resolveSignal, the one rule for every consumer', async () => {
     await withServer({}, async ({ baseUrl, store }) => {
       // The Netatmo leads for bedroom temperature but is stale; the Tado is
       // fresh and second — precedence has something real to decide.

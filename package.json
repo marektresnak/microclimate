@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Collects readings from home sensors and drives the HRV unit based on air quality.",
+  "description": "Collects readings from home sensors, serves them over a small JSON API, and sets the HRV unit's fan level over Modbus on request.",
   "engines": {
     "node": ">=26"
   },

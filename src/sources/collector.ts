@@ -5,13 +5,8 @@ import type { SensorSource } from './source.ts';
 
 /**
  * Polls every source on its own cadence and stores whatever arrives. Collection
- * and nothing else — no decision, no actuation.
- *
- * This is the control loop's first step, extracted. The loop is parked (see
- * CLAUDE.md): while it is, something still has to gather readings, because
- * collection is the platform and the controller was only its first consumer.
- * The loop polls for itself when it runs, so the two are alternatives wired in
- * `main.ts` — never both, or every source would be asked twice.
+ * and nothing else — no decision, no actuation. Collection is the platform:
+ * everything else this service will ever do reads from what lands here.
  */
 export interface CollectorDependencies {
   readonly sources: readonly SensorSource[];

@@ -6,10 +6,10 @@ import { dirname } from 'node:path';
  * not the database.
  *
  * Netatmo rotates the refresh token on every refresh, so *something* mutable
- * has to hold the current one — and the database gave up its last mutable row
- * on purpose (see CLAUDE.md on the removed `control_state` table). A file also
- * keeps a live credential out of every database backup: the readings are worth
- * copying around, a secret is not. `data/` is gitignored, so it cannot be
+ * has to hold the current one — and the database is append-only on purpose,
+ * with no mutable row in it at all (see CLAUDE.md's data-model section). A file
+ * also keeps a live credential out of every database backup: the readings are
+ * worth copying around, a secret is not. `data/` is gitignored, so it cannot be
  * committed.
  *
  * Shared by the adapter (reads it before every refresh, writes the rotation)

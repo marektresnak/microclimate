@@ -1,14 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import {
-  MAX_COMMANDED_LEVEL,
-  MIN_LEVEL,
-  assertCommandedLevel,
-  stepDown,
-  toCommandedLevel,
-  toLevel,
-} from '../src/domain/level.ts';
+import { assertCommandedLevel, toLevel } from '../src/domain/level.ts';
 
 describe('reading a level back from the unit', () => {
   it('accepts the wall panel levels we are not allowed to command', () => {
@@ -46,47 +39,5 @@ describe('the commanded ceiling', () => {
     assert.throws(() => assertCommandedLevel(0));
     assert.throws(() => assertCommandedLevel(35));
     assert.throws(() => assertCommandedLevel(Number.NaN));
-  });
-
-  it('clamps a demand above the ceiling down to it', () => {
-    assert.equal(toCommandedLevel(95), MAX_COMMANDED_LEVEL);
-    assert.equal(toCommandedLevel(1000), MAX_COMMANDED_LEVEL);
-  });
-
-  it('clamps a demand below the floor up to it — the unit is never off', () => {
-    assert.equal(toCommandedLevel(0), MIN_LEVEL);
-    assert.equal(toCommandedLevel(-40), MIN_LEVEL);
-  });
-});
-
-describe('quantising the proportional band onto the seven steps', () => {
-  it('rounds to the nearest step', () => {
-    assert.equal(toCommandedLevel(44), 40);
-    assert.equal(toCommandedLevel(46), 50);
-    assert.equal(toCommandedLevel(50), 50);
-  });
-
-  it('rounds a value sitting exactly between two steps upward', () => {
-    // Pinned rather than argued about: the boundary is a knife edge either way,
-    // and hysteresis is what stops it mattering.
-    assert.equal(toCommandedLevel(45), 50);
-  });
-
-  it('makes every single step reachable', () => {
-    // The Q2 regression guard: an earlier design required targets to differ by
-    // more than one step, which made 20 -> 30 and 70 -> 80 impossible.
-    const reachable = [20, 30, 40, 50, 60, 70, 80].map((step) => toCommandedLevel(step));
-    assert.deepEqual(reachable, [20, 30, 40, 50, 60, 70, 80]);
-  });
-});
-
-describe('stepping down', () => {
-  it('moves exactly one step', () => {
-    assert.equal(stepDown(80), 70);
-    assert.equal(stepDown(30), 20);
-  });
-
-  it('stops at the floor', () => {
-    assert.equal(stepDown(MIN_LEVEL), MIN_LEVEL);
   });
 });

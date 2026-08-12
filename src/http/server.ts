@@ -126,10 +126,10 @@ export function createApiServer(
   app.get('/health', (c) => c.json({ ok: true }));
 
   /**
-   * One value per (room, kind), resolved by the same `resolveSignal` the
-   * controller uses — one implementation, two consumers, so the dashboard and
-   * the control decision cannot disagree about what a room currently says.
-   * The control block itself is parked with the loop; see CLAUDE.md.
+   * One value per (room, kind), resolved through `resolveSignal` — the one
+   * rule for what a room currently says. Anything added later that reads
+   * room-level values goes through the same function, so two consumers can
+   * never disagree.
    */
   app.get('/api/state', (c) => {
     const now = dependencies.clock();
@@ -242,9 +242,10 @@ export function createApiServer(
   });
 
   // Open like every write on this LAN, and this one carries the sharper risk
-  // of the two: a poisoned reading outlives its request, and once the loop is
-  // rewired, invented bedroom CO2 steers the fan. Accepted knowingly — the
-  // decision and its bounds are in CLAUDE.md beside the unit endpoint's.
+  // of the two: a poisoned reading outlives its request, and the day an
+  // automation drives the fan from CO2, invented bedroom readings steer it.
+  // Accepted knowingly — the decision and its bounds are in CLAUDE.md beside
+  // the unit endpoint's.
   //
   // 200 whenever the batch was processed, verdicts inside: a rejected reading
   // cannot be fixed by resending it, so a status a simple node reads as
