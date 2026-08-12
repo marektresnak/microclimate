@@ -12,8 +12,8 @@ import type { MeasurementKind, Reading } from '../src/domain/measurement.ts';
 import { resolveSignal } from '../src/domain/precedence.ts';
 import { toIsoUtc } from '../src/domain/time.ts';
 import { createApiServer } from '../src/http/server.ts';
-import type { ApiServerDependencies, NetatmoAuthOptions } from '../src/http/server.ts';
-import type { FetchLike } from '../src/sources/netatmo.ts';
+import type { ApiServerDependencies } from '../src/http/server.ts';
+import type { FetchLike, NetatmoSettings } from '../src/sources/netatmo.ts';
 import { loadRefreshToken } from '../src/sources/netatmo-token.ts';
 import { openLogStore } from '../src/store/logs.ts';
 import type { LogStore } from '../src/store/logs.ts';
@@ -78,7 +78,7 @@ function scriptedFetch(script: ScriptStep[]): { impl: FetchLike; requests: Recor
 }
 
 interface Overrides {
-  readonly netatmoAuth?: NetatmoAuthOptions | undefined;
+  readonly netatmoAuth?: NetatmoSettings | undefined;
   readonly script?: ScriptStep[];
 }
 

@@ -37,15 +37,31 @@ const POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 });
 
 export type FetchLike = typeof fetch;
 
-export interface NetatmoOptions {
+/**
+ * The app registration and the token file — one identity, built once in
+ * main.ts and handed whole to both of its consumers: this adapter and the
+ * /auth/netatmo onboarding routes. Sharing the object is what keeps them
+ * agreeing on `tokenPath`; an onboarding that saved a token where the poller
+ * does not read would be a lockout wearing a success page. `redirectUri`
+ * belongs to the onboarding half alone — the poller carries it unread, the
+ * price of one type instead of two overlapping ones.
+ */
+export interface NetatmoSettings {
   readonly clientId: string;
   readonly clientSecret: string;
+  /** Must match the Netatmo app registration exactly, or the exchange fails. */
+  readonly redirectUri: string;
+  readonly tokenPath: string;
+}
+
+export interface NetatmoOptions {
+  /** The identity shared with the onboarding routes — see NetatmoSettings. */
+  readonly settings: NetatmoSettings;
   /** Narrows the response to one station when the account has several. */
   readonly deviceId: string | undefined;
   /** Which instrument in config these readings belong to. Identity is the
    * wiring's decision, not the protocol's — see config on relocation. */
   readonly sourceId: SensorId;
-  readonly tokenPath: string;
   /** NETATMO_REFRESH_TOKEN from the environment, used only until the token
    * file exists. After the first rotation the file is the truth and this is a
    * stale credential kept for nothing but the bootstrap. */
@@ -77,7 +93,7 @@ export function createNetatmoSource(
     // Read the file on every refresh rather than once at start-up, so a
     // re-authorisation through /auth/netatmo takes effect at the next refresh
     // without a restart.
-    const refreshToken = loadRefreshToken(options.tokenPath) ?? options.seedRefreshToken;
+    const refreshToken = loadRefreshToken(options.settings.tokenPath) ?? options.seedRefreshToken;
     if (refreshToken === undefined) {
       throw new Error('no Netatmo refresh token — authorise once at /auth/netatmo');
     }
@@ -87,8 +103,8 @@ export function createNetatmoSource(
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
-        client_id: options.clientId,
-        client_secret: options.clientSecret,
+        client_id: options.settings.clientId,
+        client_secret: options.settings.clientSecret,
         refresh_token: refreshToken,
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT.total('milliseconds')),
@@ -112,7 +128,7 @@ export function createNetatmoSource(
     // next restart may need re-authorising by hand.
     if (tokens.refreshToken !== undefined) {
       try {
-        saveRefreshToken(options.tokenPath, tokens.refreshToken);
+        saveRefreshToken(options.settings.tokenPath, tokens.refreshToken);
       } catch (error) {
         options.log(
           `could not persist the rotated Netatmo refresh token: ${messageOf(error)} — ` +

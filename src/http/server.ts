@@ -20,7 +20,7 @@ import { resolveSignal } from '../domain/precedence.ts';
 import type { RoomSignal } from '../domain/signal.ts';
 import { parseInstant, toIsoUtc } from '../domain/time.ts';
 import { NETATMO_TOKEN_URL } from '../sources/netatmo.ts';
-import type { FetchLike } from '../sources/netatmo.ts';
+import type { FetchLike, NetatmoSettings } from '../sources/netatmo.ts';
 import { saveRefreshToken } from '../sources/netatmo-token.ts';
 import type { LogLine, LogStore } from '../store/logs.ts';
 import type { ReadingStore } from '../store/readings.ts';
@@ -60,20 +60,14 @@ const DAY = Temporal.Duration.from({ hours: 24 });
 const COMMAND_BODY_BYTES = 16 * 1024;
 const INGEST_BODY_BYTES = 256 * 1024;
 
-export interface NetatmoAuthOptions {
-  readonly clientId: string;
-  readonly clientSecret: string;
-  /** Must match the Netatmo app registration exactly, or the exchange fails. */
-  readonly redirectUri: string;
-  readonly tokenPath: string;
-}
-
 export interface ApiServerDependencies {
   readonly store: ReadingStore;
   readonly logs: LogStore;
   readonly unit: VentilationUnit;
-  /** Unset disables the two /auth/netatmo routes, with an explanation. */
-  readonly netatmoAuth: NetatmoAuthOptions | undefined;
+  /** The identity the polling adapter also holds — the same object, so the
+   * onboarding routes save the token where the poller reads it. Unset
+   * disables the two /auth/netatmo routes, with an explanation. */
+  readonly netatmoAuth: NetatmoSettings | undefined;
   readonly clock: () => Temporal.Instant;
   readonly log: (line: string) => void;
 }

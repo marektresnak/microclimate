@@ -9,9 +9,9 @@ import { createFakeUnit } from './actuator/fake.ts';
 import { createModbusUnit } from './actuator/modbus-tcp.ts';
 import type { VentilationUnit } from './actuator/unit.ts';
 import { createApiServer } from './http/server.ts';
-import type { NetatmoAuthOptions } from './http/server.ts';
 import { createCollector } from './sources/collector.ts';
 import { createNetatmoSource } from './sources/netatmo.ts';
+import type { NetatmoSettings } from './sources/netatmo.ts';
 import type { SensorSource } from './sources/source.ts';
 import { toIsoUtc } from './domain/time.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from './sources/synthetic.ts';
@@ -86,7 +86,9 @@ function chooseUnit(): VentilationUnit {
 const netatmoClientId = envOrUndefined('NETATMO_CLIENT_ID');
 const netatmoClientSecret = envOrUndefined('NETATMO_CLIENT_SECRET');
 
-const netatmoAuth: NetatmoAuthOptions | undefined =
+// Built once and handed whole to both consumers — the polling adapter and the
+// onboarding routes — so they cannot disagree on where the token file lives.
+const netatmoSettings: NetatmoSettings | undefined =
   netatmoClientId !== undefined && netatmoClientSecret !== undefined
     ? {
         clientId: netatmoClientId,
@@ -102,15 +104,13 @@ const netatmoAuth: NetatmoAuthOptions | undefined =
 // with invented readings — and the record of real air this phase exists to
 // gather has to be real or it is worthless.
 function chooseSources(): readonly SensorSource[] {
-  if (netatmoAuth === undefined) return [createSyntheticNetatmo(), createSyntheticTado()];
+  if (netatmoSettings === undefined) return [createSyntheticNetatmo(), createSyntheticTado()];
 
   return [
     createNetatmoSource({
-      clientId: netatmoAuth.clientId,
-      clientSecret: netatmoAuth.clientSecret,
+      settings: netatmoSettings,
       deviceId: envOrUndefined('NETATMO_DEVICE_ID'),
       sourceId: 'bedroom_netatmo',
-      tokenPath: netatmoTokenPath,
       seedRefreshToken: envOrUndefined('NETATMO_REFRESH_TOKEN'),
       log,
     }),
@@ -125,7 +125,7 @@ const server = createApiServer({
   store,
   logs: logStore,
   unit,
-  netatmoAuth,
+  netatmoAuth: netatmoSettings,
   clock: () => Temporal.Now.instant(),
   log,
 });

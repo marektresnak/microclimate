@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { createNetatmoSource } from '../src/sources/netatmo.ts';
-import type { FetchLike, NetatmoOptions } from '../src/sources/netatmo.ts';
+import type { FetchLike, NetatmoOptions, NetatmoSettings } from '../src/sources/netatmo.ts';
 import { loadRefreshToken, saveRefreshToken } from '../src/sources/netatmo-token.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import { assertDeepEqual } from './support/deep-equal.ts';
@@ -82,13 +82,20 @@ function temporaryTokenPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'netatmo-')), 'token.json');
 }
 
-function options(overrides: Partial<NetatmoOptions> = {}): NetatmoOptions {
+function settings(tokenPath: string = temporaryTokenPath()): NetatmoSettings {
   return {
     clientId: 'client-id',
     clientSecret: 'client-secret',
+    redirectUri: 'http://flat.local:3000/auth/netatmo/callback',
+    tokenPath,
+  };
+}
+
+function options(overrides: Partial<NetatmoOptions> = {}): NetatmoOptions {
+  return {
+    settings: settings(),
     deviceId: undefined,
     sourceId: 'bedroom_netatmo',
-    tokenPath: temporaryTokenPath(),
     seedRefreshToken: 'seed-token',
     log: () => undefined,
     ...overrides,
@@ -200,7 +207,7 @@ describe('the netatmo source', () => {
       tokenGrant('rotated-seed-token'),
       homeCoach(842),
     ]);
-    const source = createNetatmoSource(options({ tokenPath }), fake.impl);
+    const source = createNetatmoSource(options({ settings: settings(tokenPath) }), fake.impl);
 
     await source.poll(NOW);
     assert.equal(loadRefreshToken(tokenPath), 'rotated-seed-token');
@@ -214,7 +221,7 @@ describe('the netatmo source', () => {
     const tokenPath = temporaryTokenPath();
     saveRefreshToken(tokenPath, 'from-the-file');
     const fake = scriptedFetch([tokenGrant('from-the-file'), homeCoach(842)]);
-    const source = createNetatmoSource(options({ tokenPath }), fake.impl);
+    const source = createNetatmoSource(options({ settings: settings(tokenPath) }), fake.impl);
 
     await source.poll(NOW);
 
@@ -244,7 +251,10 @@ describe('the netatmo source', () => {
     const lines: string[] = [];
     const fake = scriptedFetch([tokenGrant('seed-token'), homeCoach(842)]);
     const source = createNetatmoSource(
-      options({ tokenPath: join(readOnly, 'token.json'), log: (line) => void lines.push(line) }),
+      options({
+        settings: settings(join(readOnly, 'token.json')),
+        log: (line) => void lines.push(line),
+      }),
       fake.impl,
     );
 
