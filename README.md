@@ -78,7 +78,8 @@ actually clears. A stale low reading does not suppress a boost. The unit is at 7
 begin and drops at once — because the cap is evaluated against where the unit *is*, not only
 against a freshly computed target.
 
-Around 1,600 lines of source and 2,800 of tests, no runtime dependencies.
+Around 1,600 lines of source and 2,800 of tests. Two runtime dependencies — `hono` and its Node
+adapter, serving the API — admitted late and deliberately; everything else is Node built-ins.
 
 ## Four decisions worth knowing before you read
 
@@ -109,8 +110,8 @@ list and four rounds of design review are in [`docs/test-plan.md`](docs/test-pla
 ## Running
 
 Requires **Node 24 or later** (developed on 26). No build step — Node strips the types at runtime
-and `node:sqlite` is built in, so there are no native modules to compile and no runtime
-dependencies at all.
+and `node:sqlite` is built in, so there is nothing to compile, native or otherwise. The two
+runtime dependencies (`hono`, `@hono/node-server`) are plain JavaScript.
 
 ```sh
 npm install

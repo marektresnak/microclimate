@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { Server } from 'node:http';
+
+import { getRequestListener } from '@hono/node-server';
+import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 
 import type { VentilationUnit } from '../actuator/unit.ts';
 import { PRECEDENCE, ROOM_IDS, SENSOR_IDS, SENSORS } from '../config.ts';
@@ -20,18 +24,25 @@ import type { ReadingStore } from '../store/readings.ts';
 
 /**
  * The read API, the two open writes (fan level, ingest), and the Netatmo
- * onboarding pair. Hand-rolled on `node:http`: nine routes do not justify a
- * router dependency.
+ * onboarding pair. Routes are declared on Hono and served through
+ * `getRequestListener`, so this still returns an ordinary `node:http` Server
+ * and nothing that wires or tests it knows a framework is underneath.
+ *
+ * Hono and its node adapter are the project's only runtime dependencies,
+ * admitted for exactly this file: route dispatch, body reading and response
+ * plumbing are boilerplate that kept failing the review contract's own
+ * readability test, and they are also the code a framework can absorb without
+ * absorbing any decision. Everything that decides — narrowing, precedence,
+ * the OAuth state — is the same code it was without it.
  *
  * No endpoint carries auth — single home, trusted LAN, as designed. That
- * includes the one that moves the hardware, which reverses an earlier decision
- * and a review finding; the acceptance and its bounds are recorded in
- * CLAUDE.md ("The write endpoint is open on the LAN"). What any caller can do
- * is bounded by construction: 20-80, never off, never above the grille
- * ceiling.
+ * includes the two writes, which reverses an earlier decision and a review
+ * finding; the acceptance and its bounds are recorded in CLAUDE.md ("Both
+ * write endpoints are open on the LAN"). What any caller can do is bounded by
+ * construction: 20-80, never off, never above the grille ceiling.
  *
- * Time arrives through `clock` and the network through `fetchImpl`, so every
- * test runs against a fixed instant and a canned vendor.
+ * Time arrives through `clock` and the vendor through `fetchImpl`, so every
+ * test runs against a fixed instant and a canned Netatmo.
  */
 
 const AUTHORIZE_URL = 'https://api.netatmo.com/oauth2/authorize';
@@ -43,10 +54,10 @@ const STATE_VALID_MS = 10 * 60_000;
 const EXCHANGE_TIMEOUT_MS = 10_000;
 const DAY_MS = 24 * 60 * 60_000;
 // A command body is one small JSON object; refusing early beats buffering
-// whatever a confused client pours in.
-const MAX_BODY_BYTES = 16 * 1024;
-// Ingest is the exception: a node replaying a buffered backlog sends real
-// batches. A quarter megabyte is roughly three thousand readings.
+// whatever a confused client pours in. Ingest is the exception: a node
+// replaying a buffered backlog sends real batches, and a quarter megabyte is
+// roughly three thousand readings.
+const COMMAND_BODY_BYTES = 16 * 1024;
 const INGEST_BODY_BYTES = 256 * 1024;
 
 export interface NetatmoAuthOptions {
@@ -66,6 +77,17 @@ export interface ApiServerDependencies {
   readonly log: (line: string) => void;
 }
 
+/** What /api/state says about one (room, kind). */
+type SignalBody =
+  | { readonly status: 'missing' }
+  | {
+      readonly status: 'fresh' | 'stale';
+      readonly value: number;
+      readonly sourceId: SensorId;
+      readonly measuredAt: number;
+      readonly ageMs: number;
+    };
+
 export function createApiServer(
   dependencies: ApiServerDependencies,
   fetchImpl: FetchLike = fetch,
@@ -75,92 +97,16 @@ export function createApiServer(
   // single-operator system, and it keeps this a value instead of a table.
   let pendingState: { readonly value: string; readonly issuedAt: number } | undefined;
 
-  const server = createServer((request, response) => {
-    void handle(request, response).catch((error) => {
-      dependencies.log(`${request.method ?? '?'} ${request.url ?? '?'} failed: ${messageOf(error)}`);
-      if (!response.headersSent) {
-        sendJson(response, 500, { error: messageOf(error) });
-      } else {
-        response.end();
-      }
-    });
+  const app = new Hono();
+
+  app.onError((error, c) => {
+    dependencies.log(`${c.req.method} ${c.req.path} failed: ${messageOf(error)}`);
+    return c.json({ error: messageOf(error) }, 500);
   });
 
-  async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    // The base is only there to satisfy URL's parser; requests carry a path.
-    const url = new URL(request.url ?? '/', 'http://microclimate.local');
-    const method = request.method ?? 'GET';
-    const path = url.pathname;
-    const now = dependencies.clock();
+  app.notFound((c) => c.json({ error: `no route for ${c.req.path}` }, 404));
 
-    if (path === '/health') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      return sendJson(response, 200, { ok: true });
-    }
-
-    if (path === '/api/state') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      return sendJson(response, 200, stateBody(now));
-    }
-
-    if (path === '/api/sensors') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      // The whole topology, inactive entries included — a client interpreting
-      // historical readings needs the vocabulary of the past, not just the
-      // instruments currently consulted.
-      return sendJson(response, 200, { rooms: ROOM_IDS, sensors: SENSORS, precedence: PRECEDENCE });
-    }
-
-    if (path === '/api/unit/level') {
-      if (method === 'GET') return readUnitLevel(response);
-      if (method === 'POST') return setUnitLevel(request, response);
-      return methodNotAllowed(response);
-    }
-
-    if (path === '/api/readings') {
-      if (method !== 'POST') return methodNotAllowed(response);
-      return ingestReadings(request, response, now);
-    }
-
-    if (path === '/auth/netatmo') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      return startNetatmoAuth(response, now);
-    }
-
-    if (path === '/auth/netatmo/callback') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      return finishNetatmoAuth(url, response, now);
-    }
-
-    const segments = path.split('/').filter((segment) => segment !== '');
-
-    // /api/rooms/:room/readings — room history, sources expanded from config.
-    if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'rooms' && segments[3] === 'readings') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      const room = ROOM_IDS.find((candidate) => candidate === segments[2]);
-      if (room === undefined) {
-        return sendJson(response, 404, { error: `no room called ${segments[2] ?? ''}` });
-      }
-      // Every sensor config places in the room, inactive ones included: history
-      // outlives decommissioning, and this endpoint is where it stays readable.
-      const sensorIds = SENSOR_IDS.filter((id) => SENSORS[id].room === room);
-      return history(response, url, now, { room }, sensorIds);
-    }
-
-    // /api/sensors/:id/readings — one instrument, raw.
-    if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'sensors' && segments[3] === 'readings') {
-      if (method !== 'GET') return methodNotAllowed(response);
-      const sensorId = SENSOR_IDS.find((candidate) => candidate === segments[2]);
-      if (sensorId === undefined) {
-        return sendJson(response, 404, { error: `no sensor called ${segments[2] ?? ''}` });
-      }
-      return history(response, url, now, { sensorId }, [sensorId]);
-    }
-
-    sendJson(response, 404, { error: `no route for ${path}` });
-  }
-
-  // ── the read API ───────────────────────────────────────────────────────────
+  app.get('/health', (c) => c.json({ ok: true }));
 
   /**
    * One value per (room, kind), resolved by the same `resolveSignal` the
@@ -168,11 +114,12 @@ export function createApiServer(
    * the control decision cannot disagree about what a room currently says.
    * The control block itself is parked with the loop; see CLAUDE.md.
    */
-  function stateBody(now: number): unknown {
-    const rooms: Partial<Record<RoomId, Partial<Record<MeasurementKind, unknown>>>> = {};
+  app.get('/api/state', (c) => {
+    const now = dependencies.clock();
+    const rooms: Partial<Record<RoomId, Partial<Record<MeasurementKind, SignalBody>>>> = {};
 
     for (const room of ROOM_IDS) {
-      const kinds: Partial<Record<MeasurementKind, unknown>> = {};
+      const kinds: Partial<Record<MeasurementKind, SignalBody>> = {};
 
       for (const kind of MEASUREMENT_KINDS) {
         const ranked = PRECEDENCE[room][kind];
@@ -185,88 +132,83 @@ export function createApiServer(
       rooms[room] = kinds;
     }
 
-    return { rooms };
-  }
+    return c.json({ rooms });
+  });
 
-  function latestReadingsFrom(ranked: readonly SensorId[], kind: MeasurementKind): Reading[] {
-    const readings: Reading[] = [];
+  // The whole topology, inactive entries included — a client interpreting
+  // historical readings needs the vocabulary of the past, not just the
+  // instruments currently consulted.
+  app.get('/api/sensors', (c) =>
+    c.json({ rooms: ROOM_IDS, sensors: SENSORS, precedence: PRECEDENCE }),
+  );
 
-    for (const sourceId of ranked) {
-      const latest = dependencies.store.latestReading(sourceId, kind);
-      if (latest !== undefined) readings.push(latest);
+  app.get('/api/rooms/:room/readings', (c) => {
+    const room = ROOM_IDS.find((candidate) => candidate === c.req.param('room'));
+    if (room === undefined) {
+      return c.json({ error: `no room called ${c.req.param('room')}` }, 404);
     }
 
-    return readings;
-  }
+    // Every sensor config places in the room, inactive ones included: history
+    // outlives decommissioning, and this endpoint is where it stays readable.
+    const sensorIds = SENSOR_IDS.filter((id) => SENSORS[id].room === room);
+    const result = historyBody(sensorIds, c.req.query('from'), c.req.query('to'), c.req.query('kind'), dependencies.clock());
+    if ('error' in result) return c.json(result, 400);
 
-  function history(
-    response: ServerResponse,
-    url: URL,
-    now: number,
-    subject: Record<string, string>,
-    sensorIds: readonly SensorId[],
-  ): void {
-    const range = rangeOf(url, now);
-    if ('error' in range) return sendJson(response, 400, range);
+    return c.json({ room, ...result });
+  });
 
-    const kinds = kindFilterOf(url);
-    if ('error' in kinds) return sendJson(response, 400, kinds);
-
-    const readings: Reading[] = [];
-    for (const sensorId of sensorIds) {
-      for (const kind of SENSORS[sensorId].kinds) {
-        if (!kinds.kinds.includes(kind)) continue;
-        readings.push(...dependencies.store.readingsInRange(sensorId, kind, range.from, range.to));
-      }
+  app.get('/api/sensors/:id/readings', (c) => {
+    const sensorId = SENSOR_IDS.find((candidate) => candidate === c.req.param('id'));
+    if (sensorId === undefined) {
+      return c.json({ error: `no sensor called ${c.req.param('id')}` }, 404);
     }
-    readings.sort((first, second) => first.measuredAt - second.measuredAt);
 
-    sendJson(response, 200, { ...subject, from: range.from, to: range.to, readings });
-  }
+    const result = historyBody([sensorId], c.req.query('from'), c.req.query('to'), c.req.query('kind'), dependencies.clock());
+    if ('error' in result) return c.json(result, 400);
 
-  // ── the unit ───────────────────────────────────────────────────────────────
+    return c.json({ sensorId, ...result });
+  });
 
-  async function readUnitLevel(response: ServerResponse): Promise<void> {
+  app.get('/api/unit/level', async (c) => {
     try {
-      const level = await dependencies.unit.read();
-      sendJson(response, 200, { level });
+      return c.json({ level: await dependencies.unit.read() });
     } catch (error) {
       // 502, not 500: this service is fine, the thing behind it is not.
-      sendJson(response, 502, { error: `could not read the unit: ${messageOf(error)}` });
+      return c.json({ error: `could not read the unit: ${messageOf(error)}` }, 502);
     }
-  }
+  });
 
-  async function setUnitLevel(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  app.post('/api/unit/level', bodyLimit({ maxSize: COMMAND_BODY_BYTES }), async (c) => {
     let body: unknown;
     try {
-      body = await jsonBodyOf(request, MAX_BODY_BYTES);
-    } catch (error) {
-      return sendJson(response, 400, { error: messageOf(error) });
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'the body is not JSON' }, 400);
     }
 
     if (body === null || typeof body !== 'object' || !('level' in body) || typeof body.level !== 'number') {
-      return sendJson(response, 400, { error: 'expected {"level": <20-80 in steps of 10>}' });
+      return c.json({ error: 'expected {"level": <20-80 in steps of 10>}' }, 400);
     }
 
-    // The runtime half of CommandedLevel, at the boundary where a number enters
-    // from outside. 90 and 100 die here — the intake grille cannot pass the
-    // air, and type stripping checks nothing.
+    // The runtime half of CommandedLevel, at the boundary where a number
+    // enters from outside. 90 and 100 die here — the intake grille cannot
+    // pass the air, and type stripping checks nothing.
     let level: CommandedLevel;
     try {
       level = assertCommandedLevel(body.level);
     } catch (error) {
-      return sendJson(response, 400, { error: messageOf(error) });
+      return c.json({ error: messageOf(error) }, 400);
     }
 
     try {
       await dependencies.unit.set(level);
     } catch (error) {
-      return sendJson(response, 502, { error: `could not command ${level}%: ${messageOf(error)}` });
+      return c.json({ error: `could not command ${level}%: ${messageOf(error)}` }, 502);
     }
 
     dependencies.log(`${level}% set over the API`);
-    sendJson(response, 200, { level });
-  }
+    return c.json({ level });
+  });
 
   // Open like every write on this LAN, and this one carries the sharper risk
   // of the two: a poisoned reading outlives its request, and once the loop is
@@ -274,41 +216,36 @@ export function createApiServer(
   // decision and its bounds are in CLAUDE.md beside the unit endpoint's.
   //
   // 200 whenever the batch was processed, verdicts inside: a rejected reading
-  // cannot be fixed by resending it, so a status a simple node reads as "retry"
-  // would have it replaying poison forever.
-  async function ingestReadings(
-    request: IncomingMessage,
-    response: ServerResponse,
-    now: number,
-  ): Promise<void> {
+  // cannot be fixed by resending it, so a status a simple node reads as
+  // "retry" would have it replaying poison forever.
+  app.post('/api/readings', bodyLimit({ maxSize: INGEST_BODY_BYTES }), async (c) => {
     let body: unknown;
     try {
-      body = await jsonBodyOf(request, INGEST_BODY_BYTES);
-    } catch (error) {
-      return sendJson(response, 400, { error: messageOf(error) });
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'the body is not JSON' }, 400);
     }
 
-    const outcome = ingestBatch(body, dependencies.store, now, dependencies.log);
-    if ('error' in outcome) return sendJson(response, 400, outcome);
+    const outcome = ingestBatch(body, dependencies.store, dependencies.clock(), dependencies.log);
+    if ('error' in outcome) return c.json(outcome, 400);
 
     dependencies.log(
       `ingest: ${outcome.stored} new, ${outcome.duplicates} duplicate, ${outcome.rejected.length} rejected`,
     );
-    sendJson(response, 200, outcome);
-  }
+    return c.json(outcome);
+  });
 
-  // ── netatmo onboarding ─────────────────────────────────────────────────────
-
-  function startNetatmoAuth(response: ServerResponse, now: number): void {
+  app.get('/auth/netatmo', (c) => {
     const auth = dependencies.netatmoAuth;
     if (auth === undefined) {
-      return sendJson(response, 503, {
-        error: 'set NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET to enable Netatmo onboarding',
-      });
+      return c.json(
+        { error: 'set NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET to enable Netatmo onboarding' },
+        503,
+      );
     }
 
     const state = randomUUID();
-    pendingState = { value: state, issuedAt: now };
+    pendingState = { value: state, issuedAt: dependencies.clock() };
 
     // No client_secret in this URL, deliberately: it travels through the
     // user's browser and history, and the authorisation step does not need it.
@@ -320,34 +257,44 @@ export function createApiServer(
     authorize.searchParams.set('state', state);
     authorize.searchParams.set('response_type', 'code');
 
-    response.writeHead(302, { location: authorize.toString() });
-    response.end();
-  }
+    return c.redirect(authorize.toString());
+  });
 
-  async function finishNetatmoAuth(url: URL, response: ServerResponse, now: number): Promise<void> {
+  app.get('/auth/netatmo/callback', async (c) => {
     const auth = dependencies.netatmoAuth;
     if (auth === undefined) {
-      return sendJson(response, 503, {
-        error: 'set NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET to enable Netatmo onboarding',
-      });
+      return c.json(
+        { error: 'set NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET to enable Netatmo onboarding' },
+        503,
+      );
     }
 
-    const refusal = url.searchParams.get('error');
-    if (refusal !== null) {
-      return sendPage(response, 400, 'Netatmo said no', `Netatmo refused the authorisation: ${refusal}. Start again at /auth/netatmo.`);
+    const refusal = c.req.query('error');
+    if (refusal !== undefined) {
+      return c.html(
+        page('Netatmo said no', `Netatmo refused the authorisation: ${refusal}. Start again at /auth/netatmo.`),
+        400,
+      );
     }
 
     // Single-use, consumed before anything else can go wrong with it.
-    const presented = url.searchParams.get('state');
+    const presented = c.req.query('state');
     const pending = pendingState;
     pendingState = undefined;
-    if (pending === undefined || presented !== pending.value || now - pending.issuedAt > STATE_VALID_MS) {
-      return sendPage(response, 400, 'Not our flow', 'This callback did not come from a flow this server just started, or it took longer than ten minutes. Start again at /auth/netatmo.');
+    const expired = pending !== undefined && dependencies.clock() - pending.issuedAt > STATE_VALID_MS;
+    if (pending === undefined || presented !== pending.value || expired) {
+      return c.html(
+        page(
+          'Not our flow',
+          'This callback did not come from a flow this server just started, or it took longer than ten minutes. Start again at /auth/netatmo.',
+        ),
+        400,
+      );
     }
 
-    const code = url.searchParams.get('code');
-    if (code === null) {
-      return sendPage(response, 400, 'No code', 'Netatmo sent no authorisation code. Start again at /auth/netatmo.');
+    const code = c.req.query('code');
+    if (code === undefined) {
+      return c.html(page('No code', 'Netatmo sent no authorisation code. Start again at /auth/netatmo.'), 400);
     }
 
     const exchanged = await fetchImpl(NETATMO_TOKEN_URL, {
@@ -366,11 +313,12 @@ export function createApiServer(
 
     if (!exchanged.ok) {
       const body = await exchanged.text();
-      return sendPage(
-        response,
+      return c.html(
+        page(
+          'Exchange failed',
+          `Netatmo answered ${exchanged.status}: ${body}. If this mentions the redirect URI, it must match the app registration exactly (this server sent ${auth.redirectUri}).`,
+        ),
         502,
-        'Exchange failed',
-        `Netatmo answered ${exchanged.status}: ${body}. If this mentions the redirect URI, it must match the app registration exactly (this server sent ${auth.redirectUri}).`,
       );
     }
 
@@ -378,25 +326,78 @@ export function createApiServer(
     saveRefreshToken(auth.tokenPath, refreshTokenOf(payload));
     dependencies.log('Netatmo authorised — refresh token saved');
 
-    sendPage(
-      response,
-      200,
-      'Netatmo connected',
-      'The refresh token is saved. The adapter picks it up on its next poll; you can close this tab.',
+    return c.html(
+      page(
+        'Netatmo connected',
+        'The refresh token is saved. The adapter picks it up on its next poll; you can close this tab.',
+      ),
     );
+  });
+
+  // Registration order decides: each path above answers its own methods, and
+  // anything else on a known path lands here as a 405 rather than the 404.
+  for (const knownPath of [
+    '/health',
+    '/api/state',
+    '/api/sensors',
+    '/api/rooms/:room/readings',
+    '/api/sensors/:id/readings',
+    '/api/unit/level',
+    '/api/readings',
+    '/auth/netatmo',
+    '/auth/netatmo/callback',
+  ]) {
+    app.all(knownPath, (c) => c.json({ error: 'method not allowed' }, 405));
   }
 
-  return server;
+  function latestReadingsFrom(ranked: readonly SensorId[], kind: MeasurementKind): Reading[] {
+    const readings: Reading[] = [];
+
+    for (const sourceId of ranked) {
+      const latest = dependencies.store.latestReading(sourceId, kind);
+      if (latest !== undefined) readings.push(latest);
+    }
+
+    return readings;
+  }
+
+  function historyBody(
+    sensorIds: readonly SensorId[],
+    fromRaw: string | undefined,
+    toRaw: string | undefined,
+    kindRaw: string | undefined,
+    now: number,
+  ): { from: number; to: number; readings: Reading[] } | { error: string } {
+    const range = rangeOf(fromRaw, toRaw, now);
+    if ('error' in range) return range;
+
+    const kinds = kindFilterOf(kindRaw);
+    if ('error' in kinds) return kinds;
+
+    const readings: Reading[] = [];
+    for (const sensorId of sensorIds) {
+      for (const kind of SENSORS[sensorId].kinds) {
+        if (!kinds.kinds.includes(kind)) continue;
+        readings.push(...dependencies.store.readingsInRange(sensorId, kind, range.from, range.to));
+      }
+    }
+    readings.sort((first, second) => first.measuredAt - second.measuredAt);
+
+    return { from: range.from, to: range.to, readings };
+  }
+
+  return createServer(getRequestListener(app.fetch));
 }
 
 // ── helpers with no state ────────────────────────────────────────────────────
 
-function rangeOf(url: URL, now: number): { from: number; to: number } | { error: string } {
-  const toRaw = url.searchParams.get('to');
-  const fromRaw = url.searchParams.get('from');
-
-  const to = toRaw === null ? now : Number(toRaw);
-  const from = fromRaw === null ? to - DAY_MS : Number(fromRaw);
+function rangeOf(
+  fromRaw: string | undefined,
+  toRaw: string | undefined,
+  now: number,
+): { from: number; to: number } | { error: string } {
+  const to = toRaw === undefined ? now : Number(toRaw);
+  const from = fromRaw === undefined ? to - DAY_MS : Number(fromRaw);
 
   // Epoch milliseconds, for the same reason the column is an integer: one
   // representation per instant. Rejecting NaN beats an empty result that would
@@ -411,9 +412,8 @@ function rangeOf(url: URL, now: number): { from: number; to: number } | { error:
   return { from, to };
 }
 
-function kindFilterOf(url: URL): { kinds: readonly MeasurementKind[] } | { error: string } {
-  const raw = url.searchParams.get('kind');
-  if (raw === null) return { kinds: MEASUREMENT_KINDS };
+function kindFilterOf(raw: string | undefined): { kinds: readonly MeasurementKind[] } | { error: string } {
+  if (raw === undefined) return { kinds: MEASUREMENT_KINDS };
 
   const kind = MEASUREMENT_KINDS.find((candidate) => candidate === raw);
   if (kind === undefined) return { error: `unknown kind ${raw}` };
@@ -421,7 +421,7 @@ function kindFilterOf(url: URL): { kinds: readonly MeasurementKind[] } | { error
   return { kinds: [kind] };
 }
 
-function describeSignal(signal: RoomSignal, now: number): unknown {
+function describeSignal(signal: RoomSignal, now: number): SignalBody {
   if (signal.status === 'missing') return { status: 'missing' };
 
   return {
@@ -431,33 +431,6 @@ function describeSignal(signal: RoomSignal, now: number): unknown {
     measuredAt: signal.measuredAt,
     ageMs: now - signal.measuredAt,
   };
-}
-
-function jsonBodyOf(request: IncomingMessage, maxBytes: number): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-
-    request.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        reject(new Error('the body is too large'));
-        request.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-
-    request.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        reject(new Error('the body is not JSON'));
-      }
-    });
-
-    request.on('error', reject);
-  });
 }
 
 function refreshTokenOf(payload: unknown): string {
@@ -472,29 +445,19 @@ function refreshTokenOf(payload: unknown): string {
   return payload.refresh_token;
 }
 
-function sendJson(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-  response.end(JSON.stringify(body));
-}
-
-function sendPage(response: ServerResponse, status: number, title: string, text: string): void {
-  response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
-  response.end(
+function page(title: string, text: string): string {
+  // Netatmo's error strings and query parameters end up interpolated into the
+  // onboarding pages, and they arrive from the outside world — hence escaped.
+  return (
     `<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
-      `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>`,
+    `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>`
   );
 }
 
-// Netatmo's error strings and query parameters end up interpolated into the
-// onboarding pages, and they arrive from the outside world.
 function escapeHtml(text: string): string {
   return text
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
-}
-
-function methodNotAllowed(response: ServerResponse): void {
-  sendJson(response, 405, { error: 'method not allowed' });
 }

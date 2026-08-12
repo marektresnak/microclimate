@@ -122,10 +122,18 @@ The Modbus adapter carries a runtime range assertion at the write site for the s
 one place where a number leaves the type system and becomes bytes on a wire deserves a belt as
 well as braces.
 
-Runtime dependencies so far: **none.** `fetch` and `node:http` are built in.
+Runtime dependencies: **two** — `hono` and `@hono/node-server`, admitted 2026-08-12 for one
+file, `http/server.ts`, after the hand-rolled dispatch kept failing this document's own
+readability test on re-reading. Both are pure JavaScript with no transitive dependencies, no
+native code and no install scripts; the adapter exists only because Hono speaks web-standard
+Request/Response and Node does not. The bar for any further dependency is unchanged: something I
+would have to defend in an interview, admitted only when it absorbs boilerplate rather than
+decisions — which is also why the framework stops at routing and body plumbing, while every
+narrowing, the OAuth state and the precedence rule remain this project's own code.
 
-This is deliberate. Every dependency is something I would have to defend in an interview and
-cannot fully evaluate. It also keeps the whole project readable in one sitting.
+Everything else is built in: `fetch`, `node:http` underneath the adapter, `node:sqlite`,
+`node:test`. The project held at zero dependencies until the day it stopped being the cheapest
+way to be readable, and that history is in git.
 
 **Modbus is hand-rolled**, not a library. We need exactly two function codes (read holding
 registers, write single register) against a documented register map. A general Modbus library is
