@@ -1,0 +1,940 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2026-08-12T00:00:00.000Z",
+  "__export_source": "microclimate:docs/insomnia-collection.json",
+  "resources": [
+    {
+      "_id": "wrk_microclimate",
+      "_type": "workspace",
+      "parentId": null,
+      "name": "microclimate",
+      "description": "Every endpoint the service serves, plus the failure cases worth seeing.\n\nStart it with `npm start`. With no HRV_MODBUS_HOST set it drives a fake unit that starts at 40, and with no NETATMO_CLIENT_ID it collects from synthetic sources — so this whole collection works on a laptop with no hardware and no credentials.\n\n**Every instant is an ISO 8601 string, in and out.** Out: always UTC with milliseconds, byte for byte what the `measured_at_iso` column computes. In: any ISO 8601 instant carrying an explicit zone — `Z` or an offset, normalised at the edge. Epoch milliseconds are how the store keeps `measured_at` unique inside a constraint; they are not part of this API and are refused if sent.\n\nNothing here sends auth. Both write endpoints are deliberately open on the LAN; the decision and its bounds are in CLAUDE.md under \"Both write endpoints are open on the LAN\".",
+      "scope": "collection"
+    },
+    {
+      "_id": "env_base",
+      "_type": "environment",
+      "parentId": "wrk_microclimate",
+      "name": "Base Environment",
+      "data": {
+        "base_url": "http://localhost:3000",
+        "room": "bedroom",
+        "sensor_id": "bedroom_netatmo"
+      },
+      "dataPropertyOrder": {
+        "&": ["base_url", "room", "sensor_id"]
+      },
+      "color": null,
+      "isPrivate": false,
+      "metaSortKey": 1
+    },
+    {
+      "_id": "fld_health",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "Health",
+      "description": "",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 100
+    },
+    {
+      "_id": "req_health",
+      "_type": "request",
+      "parentId": "fld_health",
+      "name": "GET /health",
+      "description": "Liveness. Answers `{\"ok\": true}` and touches nothing — no store read, no Modbus.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/health",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
+    },
+    {
+      "_id": "fld_state",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "State and topology",
+      "description": "The two whole-system views: what every room currently says, and what the instruments are.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 200
+    },
+    {
+      "_id": "req_state",
+      "_type": "request",
+      "parentId": "fld_state",
+      "name": "GET /api/state",
+      "description": "Room-level: one value per (room, kind), resolved by the same `resolveSignal` the controller uses — one implementation, two consumers.\n\nEach value carries `status` (fresh | stale | missing), its `value`, the `sourceId` that produced it and `measuredAt`. The moment a number looks wrong the first question is which instrument said so, and the answer is already in the response.\n\n**No age travels with the value.** The freshness judgement is made server-side, against that source's own window and this server's clock; handing over an age would invite a second judgement against a clock that may not agree. `status` is the answer; `measuredAt` is there for anyone who wants to plot the gap.\n\nA kind with no precedence entry for a room is omitted entirely: living-room CO2 has no instrument until the SEN66 arrives.\n\nThere is no control block in this response. It is parked with the loop and returns with it.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/state",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
+    },
+    {
+      "_id": "req_sensors",
+      "_type": "request",
+      "parentId": "fld_state",
+      "name": "GET /api/sensors",
+      "description": "The config topology, served so a client can interpret ids without reading files: rooms, sensors (room, kinds, isActive, freshness window) and the per-(room, kind) precedence lists.\n\nInactive entries are included. Sensors are never deleted from config — old readings have to stay interpretable, and this is where that vocabulary lives.\n\n`freshnessWindowMs` stays a number of milliseconds. It is a duration, not an instant, and epoch was never the objection to those — 90000 can be compared without anyone parsing it first.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/sensors",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 200
+    },
+    {
+      "_id": "fld_history",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "History",
+      "description": "Two views of the same rows: expanded from a room's sensors, or one instrument at a time.\n\n`from` and `to` are ISO 8601 instants with an explicit zone. Omitted, they default to the last 24 hours. They are echoed back in the response as UTC, so you can always see the window that was actually applied. There is no range cap: single user, trusted LAN, accepted.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 300
+    },
+    {
+      "_id": "req_room_history",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/rooms/:room/readings — last 24 h",
+      "description": "Room-level history. Sources are expanded from config, inactive ones included.\n\nThe three query parameters are disabled — enable any of them to narrow. An unknown `?kind=` matches no declared kind and yields an empty history, which is the same honest answer as a kind nothing has reported yet.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/rooms/{{ _.room }}/readings",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_room_kind",
+          "name": "kind",
+          "value": "co2",
+          "description": "One MeasurementKind. Omitted means every kind the room's sensors declare.",
+          "disabled": true
+        },
+        {
+          "id": "pair_room_from",
+          "name": "from",
+          "value": "2026-08-06T00:00:00Z",
+          "description": "ISO 8601 with a zone. Defaults to `to` minus 24 h.",
+          "disabled": true
+        },
+        {
+          "id": "pair_room_to",
+          "name": "to",
+          "value": "2026-08-07T00:00:00Z",
+          "description": "ISO 8601 with a zone. Defaults to now.",
+          "disabled": true
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
+    },
+    {
+      "_id": "req_room_history_range",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/rooms/bedroom/readings — explicit range, CO2 only",
+      "description": "The same endpoint with the range and kind spelled out. This window covers the timestamps the Ingest folder posts, so run those first and the readings appear here.\n\nNote `receivedAt` in the response: it is today, while `measuredAt` is the day the reading claims. The two are never conflated — that is what makes a replayed backlog land as history rather than as a burst of fresh data.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/rooms/bedroom/readings",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_range_kind",
+          "name": "kind",
+          "value": "co2",
+          "description": "",
+          "disabled": false
+        },
+        {
+          "id": "pair_range_from",
+          "name": "from",
+          "value": "2026-08-06T00:00:00Z",
+          "description": "",
+          "disabled": false
+        },
+        {
+          "id": "pair_range_to",
+          "name": "to",
+          "value": "2026-08-07T00:00:00Z",
+          "description": "",
+          "disabled": false
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 200
+    },
+    {
+      "_id": "req_room_history_offset",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/rooms/bedroom/readings — the same window in Prague time",
+      "description": "The identical window written with a `+02:00` offset instead of `Z`. The response echoes `from` and `to` back in UTC, which is how you can see the normalisation happen.\n\nAn offset is accepted because it names a real instant unambiguously and resolves to the same number at the edge. What is refused is a timestamp with *no* zone: `Date.parse` would read that as the host's local time, so the same request would mean different instants on the server and on the laptop that sent it.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/rooms/bedroom/readings",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_offset_kind",
+          "name": "kind",
+          "value": "co2",
+          "description": "",
+          "disabled": false
+        },
+        {
+          "id": "pair_offset_from",
+          "name": "from",
+          "value": "2026-08-06T02:00:00+02:00",
+          "description": "The same instant as 2026-08-06T00:00:00Z.",
+          "disabled": false
+        },
+        {
+          "id": "pair_offset_to",
+          "name": "to",
+          "value": "2026-08-07T02:00:00+02:00",
+          "description": "The same instant as 2026-08-07T00:00:00Z.",
+          "disabled": false
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 300
+    },
+    {
+      "_id": "req_sensor_history",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/sensors/:id/readings",
+      "description": "Per-instrument detail, for when you want to see the raw instrument rather than what precedence chose for the room. Same range and kind parameters.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/sensors/{{ _.sensor_id }}/readings",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_sensor_kind",
+          "name": "kind",
+          "value": "temperature",
+          "description": "",
+          "disabled": true
+        },
+        {
+          "id": "pair_sensor_from",
+          "name": "from",
+          "value": "2026-08-06T00:00:00Z",
+          "description": "",
+          "disabled": true
+        },
+        {
+          "id": "pair_sensor_to",
+          "name": "to",
+          "value": "2026-08-07T00:00:00Z",
+          "description": "",
+          "disabled": true
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 400
+    },
+    {
+      "_id": "req_sensor_history_sibling",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/sensors/kids_room_tado_right/readings — the second valve",
+      "description": "The kids' room has two Tado valves and they read differently, because they sit next to different radiators. `/api/state` shows only whichever precedence ranks first; this is how you see the other one.\n\nNothing ever averages them — a mean describes neither.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/sensors/kids_room_tado_right/readings",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_sibling_kind",
+          "name": "kind",
+          "value": "temperature",
+          "description": "",
+          "disabled": false
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 500
+    },
+    {
+      "_id": "req_room_unknown",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/rooms/bathroom/readings — 404",
+      "description": "Expect 404 `{\"error\": \"no room called bathroom\"}`. Room ids come from config's `as const` list, so this is a closed set.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/rooms/bathroom/readings",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 600
+    },
+    {
+      "_id": "req_sensor_unknown",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/sensors/hallway_sen66/readings — 404",
+      "description": "Expect 404 `{\"error\": \"no sensor called hallway_sen66\"}`. The SEN66 nodes are planned, not configured.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/sensors/hallway_sen66/readings",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 700
+    },
+    {
+      "_id": "req_range_nonsense",
+      "_type": "request",
+      "parentId": "fld_history",
+      "name": "GET /api/rooms/bedroom/readings — the four bounds that are refused",
+      "description": "All four answer 400 `{\"error\": \"from and to must be ISO 8601 timestamps with a zone, e.g. 2026-08-12T09:36:00Z\"}`. Enable one parameter at a time.\n\n- `yesterday` — not a timestamp at all.\n- `1786000000000` — epoch milliseconds, the shape this API used to speak. Refused rather than guessed at, so a client left on the old format fails loudly instead of quietly querying 1970.\n- `2026-08-06` — a bare date. Convenient, and a second grammar; one rule wins.\n- `2026-08-12T09:36:00` — no zone, so it would mean a different instant per machine and shift by an hour twice a year.\n\nAlso worth knowing what is *not* refused: an inverted range (`from` after `to`) is honest rather than an error — the store simply returns nothing for it. And `2026-02-31T00:00:00Z` is refused, which took a deliberate guard: `Date.parse` rejects month 13 and hour 25 on its own but silently rolls an impossible day forward into the next month.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/rooms/bedroom/readings",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_bad_word",
+          "name": "from",
+          "value": "yesterday",
+          "description": "",
+          "disabled": false
+        },
+        {
+          "id": "pair_bad_epoch",
+          "name": "from",
+          "value": "1786000000000",
+          "description": "Epoch milliseconds — no longer part of this API.",
+          "disabled": true
+        },
+        {
+          "id": "pair_bad_dateonly",
+          "name": "from",
+          "value": "2026-08-06",
+          "description": "A bare date carries no time and no zone.",
+          "disabled": true
+        },
+        {
+          "id": "pair_bad_nozone",
+          "name": "from",
+          "value": "2026-08-12T09:36:00",
+          "description": "No zone: host-local, and therefore ambiguous.",
+          "disabled": true
+        },
+        {
+          "id": "pair_bad_nonexistent",
+          "name": "to",
+          "value": "2026-02-31T00:00:00Z",
+          "description": "A date that does not exist. Date.parse would roll it into March.",
+          "disabled": true
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 800
+    },
+    {
+      "_id": "fld_unit",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "The unit",
+      "description": "The fan, read and written live over Modbus TCP.\n\nWhile the control loop is parked this POST *is* the automation: a level is held by hand, CO2 is watched settling, and the band gets recomputed from those settling points. There is deliberately no quiet-hours check here — the wall panel would bypass it anyway, and partial cover that reads as protection is worse than a known gap.\n\nNo auth, knowingly. Everything a caller can do is bounded by construction: 20 to 80, never off, never above the grille ceiling.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 400
+    },
+    {
+      "_id": "req_unit_read",
+      "_type": "request",
+      "parentId": "fld_unit",
+      "name": "GET /api/unit/level",
+      "description": "Reads the fan live (Modbus FC3, wire register 21001). This is how a wall-panel change stays visible while the loop's read-every-tick is parked.\n\n502, not 500, when the unit does not answer: this service is fine, the thing behind it is not.\n\nWith no HRV_MODBUS_HOST set you are talking to the recording fake, which starts at 40.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/unit/level",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
+    },
+    {
+      "_id": "req_unit_set",
+      "_type": "request",
+      "parentId": "fld_unit",
+      "name": "POST /api/unit/level — set 50",
+      "description": "Commands the fan (Modbus FC6; the value goes on the wire as percent × 10, so 50 is written as 500).\n\nLegal values are 20, 30, 40, 50, 60, 70, 80. Follow with the GET above to see it read back.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/unit/level",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"level\": 50\n}"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_unit_set",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 200
+    },
+    {
+      "_id": "req_unit_ceiling",
+      "_type": "request",
+      "parentId": "fld_unit",
+      "name": "POST /api/unit/level — 90 refused",
+      "description": "Expect 400 `{\"error\": \"90 is not a commandable level (20-80 in steps of 10)\"}`.\n\nThe device would accept 90. The intake grille in this flat cannot pass the air, so we never send it. `CommandedLevel` makes it a compile error in our own code; `assertCommandedLevel` is the runtime half, standing where a number arrives from outside — Node strips types rather than checking them.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/unit/level",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"level\": 90\n}"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_unit_ceiling",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 300
+    },
+    {
+      "_id": "req_unit_offstep",
+      "_type": "request",
+      "parentId": "fld_unit",
+      "name": "POST /api/unit/level — 55 refused",
+      "description": "Expect 400. Power is a discrete level in steps of 10; whether the unit itself would round 55 is open question 2 in CLAUDE.md, and we never find out because we never send it.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/unit/level",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"level\": 55\n}"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_unit_offstep",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 400
+    },
+    {
+      "_id": "req_unit_shape",
+      "_type": "request",
+      "parentId": "fld_unit",
+      "name": "POST /api/unit/level — level as a string, 400",
+      "description": "Expect 400 `{\"error\": \"expected {\\\"level\\\": <20-80 in steps of 10>}\"}`.\n\nThe shape check runs before the range check, so a wrong type gets told what the body should look like rather than a range message about a string.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/unit/level",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"level\": \"50\"\n}"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_unit_shape",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 500
+    },
+    {
+      "_id": "req_unit_notjson",
+      "_type": "request",
+      "parentId": "fld_unit",
+      "name": "POST /api/unit/level — form body, 400",
+      "description": "A form-encoded body is not JSON, so expect 400 `{\"error\": \"the body is not JSON\"}`.\n\nWorth knowing what this does *not* prove: a `text/plain` body carrying real JSON is still parsed and still commands the fan. That is the CSRF shape a browser can produce without a preflight, and it is the residual risk accepted when auth was removed — bounded to a noisy night by the 20-80 clamp, and recorded in CLAUDE.md rather than half-fixed.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/unit/level",
+      "body": {
+        "mimeType": "application/x-www-form-urlencoded",
+        "params": [
+          {
+            "id": "pair_form_level",
+            "name": "level",
+            "value": "50",
+            "description": "",
+            "disabled": false
+          }
+        ]
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_unit_form",
+          "name": "Content-Type",
+          "value": "application/x-www-form-urlencoded"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 600
+    },
+    {
+      "_id": "fld_ingest",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "Ingest",
+      "description": "`POST /api/readings` takes a batch: a JSON array, each reading carrying its own ISO 8601 `measuredAt`. A SEN66 reports nine measurements per cycle and must not make nine requests, and a node that buffered through an outage replays its backlog with the original timestamps intact.\n\nThe status is 200 whenever the batch was *processed*, with the verdicts inside. A rejected reading cannot be fixed by resending it, so a status a simple node reads as \"retry\" would have it replaying poison forever.\n\nBody limit is 256 KB, roughly three thousand readings.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 500
+    },
+    {
+      "_id": "req_ingest_replay",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — send twice, replay is a no-op",
+      "description": "Send once: `stored: 3, duplicates: 0`. Send again: `stored: 0, duplicates: 3`.\n\n`UNIQUE (source_id, kind, measured_at)` with `INSERT OR IGNORE`. Push nodes retry, and a retried batch must be a no-op — duplicates in a metrics store do not announce themselves, they surface months later as spikes in a graph. The ignore keeps the *first* `received_at`, which is when the reading genuinely first arrived.\n\nThese land on 2026-08-06, so use the History folder's explicit-range request to see them.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "[\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\", \"value\": 640, \"measuredAt\": \"2026-08-06T07:30:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\", \"value\": 705, \"measuredAt\": \"2026-08-06T07:35:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\", \"value\": 788, \"measuredAt\": \"2026-08-06T07:40:00Z\" }\n]"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_replay",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
+    },
+    {
+      "_id": "req_ingest_offset",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — the same instant in Prague time",
+      "description": "Run the replay request above first, then this one. Expect `stored: 0, duplicates: 1`.\n\n`2026-08-06T09:30:00+02:00` is the first reading of that batch written with an offset instead of `Z`. One moment, two spellings — resolved to the same number at the edge, so the uniqueness constraint recognises it as the duplicate it is.\n\nThat is the whole reason offsets can be accepted at all. The integer in the column is what makes `measured_at` unique, and it never learns which spelling arrived; a node whose clock reads in local time is not made to convert, and replay stays idempotent across both forms.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "[\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\", \"value\": 640, \"measuredAt\": \"2026-08-06T09:30:00+02:00\" }\n]"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_offset",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 200
+    },
+    {
+      "_id": "req_ingest_now",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — three readings, timestamp by hand",
+      "description": "Edit `measuredAt` to roughly now and send, and the bedroom reads `fresh` in `/api/state` straight afterwards. Leave it and the readings still land — any past timestamp is accepted — they just read as `stale`.\n\nHand-editing this is the one place the ISO format pays you back directly: you can see what you are typing. Anything up to five minutes ahead of the server is fine too.\n\nIf your Insomnia's timestamp template tag works, `{% now 'iso-8601' %}` in place of the string keeps it permanently current. It is left as a literal here because the tag's syntax varies between versions and a broken tag is worse than a stale reading.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "[\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\",         \"value\": 812,  \"measuredAt\": \"2026-08-12T09:36:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"temperature\", \"value\": 21.4, \"measuredAt\": \"2026-08-12T09:36:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"humidity\",    \"value\": 47,   \"measuredAt\": \"2026-08-12T09:36:00Z\" }\n]"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_now",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 300
+    },
+    {
+      "_id": "req_ingest_mixed",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — one good, six rejected",
+      "description": "200. The first reading is stored; the rest come back in `rejected`, each with its index and reason:\n\n1. `unknown source hallway_sen66`\n2. `bedroom_netatmo does not report pm2_5` — a valid kind the instrument does not declare is almost certainly a wrong sourceId in node firmware, and storing it would file one instrument's data under another's name, permanently.\n3. `loudness is not a measurement kind`\n4. `measuredAt must be an ISO 8601 timestamp with a zone …` — no zone.\n5. the same reason, for epoch milliseconds. The shape this endpoint used to take, refused rather than guessed at, so a node left on the old firmware fails loudly instead of looking healthy while storing nothing.\n6. `not an object`\n\nOne bad reading does not sink the batch — failing it would hold the good readings hostage to a reading the node cannot fix by resending.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "[\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\",      \"value\": 900, \"measuredAt\": \"2026-08-06T07:45:00Z\" },\n  { \"sourceId\": \"hallway_sen66\",   \"kind\": \"co2\",      \"value\": 900, \"measuredAt\": \"2026-08-06T07:45:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"pm2_5\",    \"value\": 7,   \"measuredAt\": \"2026-08-06T07:45:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"loudness\", \"value\": 40,  \"measuredAt\": \"2026-08-06T07:45:00Z\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\",      \"value\": 900, \"measuredAt\": \"2026-08-06T07:45:00\" },\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\",      \"value\": 900, \"measuredAt\": 1786001100000 },\n  \"not an object\"\n]"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_mixed",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 400
+    },
+    {
+      "_id": "req_ingest_future",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — the future is rejected",
+      "description": "200 with one reject: `measuredAt 2106-01-01T00:00:00.000Z is more than 5 minutes ahead of this server`.\n\nThe reject names the instant back rather than a difference in milliseconds — the node has to find the fault in its own clock, and its clock reads in dates.\n\nTimestamps are validated in one direction only. A node reporting from 2106 would look eternally fresh and poison every decision downstream. Any *past* timestamp is accepted, however old — rejecting old readings would discard exactly the buffered backlog batching exists to carry, and `INSERT OR IGNORE` already makes replay idempotent at any age.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "[\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\", \"value\": 900, \"measuredAt\": \"2106-01-01T00:00:00Z\" }\n]"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_future",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 500
+    },
+    {
+      "_id": "req_ingest_calibration",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — 180 ppm, stored and logged",
+      "description": "200, `stored: 1`. Watch the server log: `bedroom_netatmo reports 180 ppm CO2, below outdoor air — probable calibration drift, stored anyway`.\n\nNDIR sensors self-calibrate by assuming they periodically see outdoor air. A flat that never gets down to outdoor CO2 drifts, and the whole band shifts with it. The reading is the *evidence* of the fault, so it is logged and never rejected — discarding it would hide the diagnosis.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "[\n  { \"sourceId\": \"bedroom_netatmo\", \"kind\": \"co2\", \"value\": 180, \"measuredAt\": \"2026-08-06T07:50:00Z\" }\n]"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_calibration",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 600
+    },
+    {
+      "_id": "req_ingest_notarray",
+      "_type": "request",
+      "parentId": "fld_ingest",
+      "name": "POST /api/readings — a bare object, 400",
+      "description": "Expect 400 `{\"error\": \"expected a JSON array of readings\"}`.\n\nThis is the one ingest failure that *is* a 400: nothing was processed, so there are no verdicts to return. A single reading still goes in an array of one.",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/readings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"sourceId\": \"bedroom_netatmo\",\n  \"kind\": \"co2\",\n  \"value\": 900,\n  \"measuredAt\": \"2026-08-06T07:55:00Z\"\n}"
+      },
+      "parameters": [],
+      "headers": [
+        {
+          "id": "hdr_ingest_notarray",
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 700
+    },
+    {
+      "_id": "fld_auth",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "Netatmo onboarding",
+      "description": "The OAuth pair that exists so no refresh token is ever pasted by hand. Netatmo rotates the refresh token on every refresh, so it lives in a file (`data/netatmo-token.json`, written atomically, mode 0600) rather than in the environment or the database.\n\nBoth routes answer 503 with an explanation unless NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET are set.\n\nThese are browser routes. Insomnia can show you the redirect and the refusal pages, but the real flow is: open `/auth/netatmo` in a browser, approve, done — the adapter re-reads the file on its next poll, no restart.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 600
+    },
+    {
+      "_id": "req_auth_start",
+      "_type": "request",
+      "parentId": "fld_auth",
+      "name": "GET /auth/netatmo",
+      "description": "302 to Netatmo's authorize page, or 503 if the credentials are unset.\n\nRedirects are turned off for this request so you can read the `Location` header: `client_id`, `redirect_uri`, `scope=read_homecoach`, a single-use `state`, `response_type=code`. No `client_secret` — that URL travels through a browser and its history, and the authorisation step does not need it.\n\nSending this arms one state value. Sending it twice invalidates the first.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/auth/netatmo",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "off",
+      "metaSortKey": 100
+    },
+    {
+      "_id": "req_auth_callback",
+      "_type": "request",
+      "parentId": "fld_auth",
+      "name": "GET /auth/netatmo/callback — wrong state",
+      "description": "With the Netatmo credentials set, expect 400 and the \"Not our flow\" page: this callback did not come from a flow this server just started. Without them the route answers 503 before it looks at anything.\n\nThe state is single-use and consumed before anything else can go wrong with it, which is also why replaying a genuine callback fails the second time.\n\nSwap `error=access_denied` in (disabled below) to see the refusal page instead — that branch is checked before the state, because a user who pressed Deny should be told that rather than accused of forging a callback.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/auth/netatmo/callback",
+      "body": {},
+      "parameters": [
+        {
+          "id": "pair_cb_code",
+          "name": "code",
+          "value": "an-authorisation-code",
+          "description": "",
+          "disabled": false
+        },
+        {
+          "id": "pair_cb_state",
+          "name": "state",
+          "value": "not-the-state-we-issued",
+          "description": "",
+          "disabled": false
+        },
+        {
+          "id": "pair_cb_error",
+          "name": "error",
+          "value": "access_denied",
+          "description": "Enable to see the refusal page. The error string is interpolated into the HTML through hono/html, which escapes every interpolation by default.",
+          "disabled": true
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "off",
+      "metaSortKey": 200
+    },
+    {
+      "_id": "fld_misc",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "Not a route",
+      "description": "",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 700
+    },
+    {
+      "_id": "req_notfound",
+      "_type": "request",
+      "parentId": "fld_misc",
+      "name": "GET /api/rooms — 404",
+      "description": "Expect 404 `{\"error\": \"no route for /api/rooms\"}`. Unmatched paths answer JSON like everything else, rather than Hono's default text.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/rooms",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
+    }
+  ]
+}
