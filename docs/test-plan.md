@@ -235,6 +235,9 @@ readings so "what happened last night" is a dashboard question rather than a she
 - `/auth/netatmo` issues a single-use `state` and keeps the client secret out of the browser URL
 - the callback rejects a forged state and a vendor refusal; a good code is exchanged and the
   refresh token lands in the token file
+  *Moved 2026-08-12: the pair lives in `http/netatmo-auth.ts`, mounted whole by the server. The
+  tests stay against the assembled server on purpose — that way the mounting itself is covered,
+  and the cases below needed no edit to survive the move.*
   *Trimmed 2026-08-12: the 10-minute state expiry is removed. The single-use exact-match state
   check is the CSRF defence and stays; the wall-clock deadline on top of it guarded against
   nothing any caller does, and only its own test ever consumed it.*

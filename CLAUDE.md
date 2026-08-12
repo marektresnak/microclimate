@@ -121,9 +121,9 @@ The Modbus adapter carries a runtime range assertion at the write site for the s
 one place where a number leaves the type system and becomes bytes on a wire deserves a belt as
 well as braces.
 
-Runtime dependencies: **two** — `hono` and `@hono/node-server`, admitted 2026-08-12 for one
-file, `http/server.ts`, after the hand-rolled dispatch kept failing this document's own
-readability test on re-reading. Both are pure JavaScript with no transitive dependencies, no
+Runtime dependencies: **two** — `hono` and `@hono/node-server`, admitted 2026-08-12 for the
+HTTP layer — `http/server.ts` and the onboarding module it mounts, `http/netatmo-auth.ts` —
+after the hand-rolled dispatch kept failing this document's own readability test on re-reading. Both are pure JavaScript with no transitive dependencies, no
 native code and no install scripts; the adapter exists only because Hono speaks web-standard
 Request/Response and Node does not. The bar for any further dependency is unchanged: something I
 would have to defend in an interview, admitted only when it absorbs boilerplate rather than
@@ -594,6 +594,10 @@ src/
     collector.ts        poll -> store, each source on its own cadence.
     netatmo.ts          pull adapter: OAuth refresh, gethomecoachsdata.
                         fetch is injected the way OpenStream is in modbus-tcp.
+                        Also defines NetatmoSettings — the identity main.ts
+                        builds once and hands whole to this adapter AND the
+                        onboarding routes, so the two cannot disagree on
+                        where the token file lives.
     netatmo-token.ts    the rotating refresh token, as a file on disk —
                         deliberately not a database row. See "Configuration".
     tado.ts             pull adapter                          (not built yet)
@@ -611,7 +615,12 @@ src/
     modbus-tcp.ts       real implementation, FC3 + FC6
     fake.ts             test double, records calls
   http/
-    server.ts           the read API, POST /api/unit/level, netatmo onboarding
+    server.ts           the read API, POST /api/unit/level, the ingest route —
+                        uniform JSON, no vendor imports
+    netatmo-auth.ts     the /auth/netatmo onboarding pair, mounted whole by
+                        server.ts — the HTTP layer's human-facing half: its
+                        only HTML, its only mutable value (the OAuth state)
+                        and its only outbound fetch
   temporal-guard.ts     refuses a runtime without Temporal, as main.ts's first
                         import — Homebrew's node compiles it out. See "Runtime
                         and dependencies".

@@ -1,11 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { html } from 'hono/html';
 
 import type { VentilationUnit } from '../actuator/unit.ts';
 import { PRECEDENCE, ROOM_IDS, SENSOR_IDS, SENSORS } from '../config.ts';
@@ -19,20 +17,21 @@ import type { MeasurementKind, Reading } from '../domain/measurement.ts';
 import { resolveSignal } from '../domain/precedence.ts';
 import type { RoomSignal } from '../domain/signal.ts';
 import { parseInstant, toIsoUtc } from '../domain/time.ts';
-import { NETATMO_TOKEN_URL } from '../sources/netatmo.ts';
+import { createNetatmoAuthRoutes } from './netatmo-auth.ts';
 import type { FetchLike, NetatmoSettings } from '../sources/netatmo.ts';
-import { saveRefreshToken } from '../sources/netatmo-token.ts';
 import type { LogLine, LogStore } from '../store/logs.ts';
 import type { ReadingStore } from '../store/readings.ts';
 
 /**
- * The read API, the two open writes (fan level, ingest), and the Netatmo
- * onboarding pair. Routes are declared on Hono and served through
- * `getRequestListener`, so this still returns an ordinary `node:http` Server
- * and nothing that wires or tests it knows a framework is underneath.
+ * The read API and the two open writes (fan level, ingest) — uniform JSON,
+ * end to end. The Netatmo onboarding pair, the API's human-facing half, lives
+ * in netatmo-auth.ts and is mounted whole below. Routes are declared on Hono
+ * and served through `getRequestListener`, so this still returns an ordinary
+ * `node:http` Server and nothing that wires or tests it knows a framework is
+ * underneath.
  *
  * Hono and its node adapter are the project's only runtime dependencies,
- * admitted for exactly this file: route dispatch, body reading and response
+ * admitted for exactly this layer: route dispatch, body reading and response
  * plumbing are boilerplate that kept failing the review contract's own
  * readability test, and they are also the code a framework can absorb without
  * absorbing any decision. Everything that decides — narrowing, precedence,
@@ -44,14 +43,11 @@ import type { ReadingStore } from '../store/readings.ts';
  * write endpoints are open on the LAN"). What any caller can do is bounded by
  * construction: 20-80, never off, never above the grille ceiling.
  *
- * Time arrives through `clock` and the vendor through `fetchImpl`, so every
- * test runs against a fixed instant and a canned Netatmo.
+ * Time arrives through `clock`, so every test runs against a fixed instant.
+ * `fetchImpl` exists for the onboarding module's token exchange and passes
+ * straight through to it — a canned Netatmo in the tests, `fetch` in main.
  */
 
-const AUTHORIZE_URL = 'https://api.netatmo.com/oauth2/authorize';
-// The one scope gethomecoachsdata needs.
-const HOME_COACH_SCOPE = 'read_homecoach';
-const EXCHANGE_TIMEOUT = Temporal.Duration.from({ seconds: 10 });
 const DAY = Temporal.Duration.from({ hours: 24 });
 // A command body is one small JSON object; refusing early beats buffering
 // whatever a confused client pours in. Ingest is the exception: a node
@@ -103,11 +99,6 @@ export function createApiServer(
   dependencies: ApiServerDependencies,
   fetchImpl: FetchLike = fetch,
 ): Server {
-  // The one live OAuth state, single-use. Only the most recent flow counts, so
-  // opening the auth page twice invalidates the first tab — acceptable for a
-  // single-operator system, and it keeps this a value instead of a table.
-  let pendingState: string | undefined;
-
   const app = new Hono();
 
   app.onError((error, c) => {
@@ -261,103 +252,9 @@ export function createApiServer(
     return c.json(outcome);
   });
 
-  app.get('/auth/netatmo', (c) => {
-    const auth = dependencies.netatmoAuth;
-    if (auth === undefined) {
-      return c.json(
-        { error: 'set NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET to enable Netatmo onboarding' },
-        503,
-      );
-    }
-
-    const state = randomUUID();
-    pendingState = state;
-
-    // No client_secret in this URL, deliberately: it travels through the
-    // user's browser and history, and the authorisation step does not need it.
-    // (Netatmo's own PHP client does send it there. We do not copy that.)
-    const authorize = new URL(AUTHORIZE_URL);
-    authorize.searchParams.set('client_id', auth.clientId);
-    authorize.searchParams.set('redirect_uri', auth.redirectUri);
-    authorize.searchParams.set('scope', HOME_COACH_SCOPE);
-    authorize.searchParams.set('state', state);
-    authorize.searchParams.set('response_type', 'code');
-
-    return c.redirect(authorize.toString());
-  });
-
-  app.get('/auth/netatmo/callback', async (c) => {
-    const auth = dependencies.netatmoAuth;
-    if (auth === undefined) {
-      return c.json(
-        { error: 'set NETATMO_CLIENT_ID and NETATMO_CLIENT_SECRET to enable Netatmo onboarding' },
-        503,
-      );
-    }
-
-    const refusal = c.req.query('error');
-    if (refusal !== undefined) {
-      return c.html(
-        page('Netatmo said no', `Netatmo refused the authorisation: ${refusal}. Start again at /auth/netatmo.`),
-        400,
-      );
-    }
-
-    // Single-use, consumed before anything else can go wrong with it.
-    const presented = c.req.query('state');
-    const pending = pendingState;
-    pendingState = undefined;
-    if (pending === undefined || presented !== pending) {
-      return c.html(
-        page(
-          'Not our flow',
-          'This callback did not come from a flow this server just started. Start again at /auth/netatmo.',
-        ),
-        400,
-      );
-    }
-
-    const code = c.req.query('code');
-    if (code === undefined) {
-      return c.html(page('No code', 'Netatmo sent no authorisation code. Start again at /auth/netatmo.'), 400);
-    }
-
-    const exchanged = await fetchImpl(NETATMO_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: auth.clientId,
-        client_secret: auth.clientSecret,
-        code,
-        redirect_uri: auth.redirectUri,
-        scope: HOME_COACH_SCOPE,
-      }),
-      signal: AbortSignal.timeout(EXCHANGE_TIMEOUT.total('milliseconds')),
-    });
-
-    if (!exchanged.ok) {
-      const body = await exchanged.text();
-      return c.html(
-        page(
-          'Exchange failed',
-          `Netatmo answered ${exchanged.status}: ${body}. If this mentions the redirect URI, it must match the app registration exactly (this server sent ${auth.redirectUri}).`,
-        ),
-        502,
-      );
-    }
-
-    const payload: unknown = await exchanged.json();
-    saveRefreshToken(auth.tokenPath, refreshTokenOf(payload));
-    dependencies.log('Netatmo authorised — refresh token saved');
-
-    return c.html(
-      page(
-        'Netatmo connected',
-        'The refresh token is saved. The adapter picks it up on its next poll; you can close this tab.',
-      ),
-    );
-  });
+  // Mounted at '/' so both full paths stay declared — and greppable — where
+  // the routes live. Errors thrown inside still land in app.onError above.
+  app.route('/', createNetatmoAuthRoutes(dependencies.netatmoAuth, dependencies.log, fetchImpl));
 
   function latestReadingsFrom(ranked: readonly SensorId[], kind: MeasurementKind): Reading[] {
     const readings: Reading[] = [];
@@ -459,24 +356,4 @@ function describeReading(reading: Reading): ReadingBody {
 
 function describeLogLine(line: LogLine): { at: string; message: string } {
   return { at: toIsoUtc(line.at), message: line.message };
-}
-
-function refreshTokenOf(payload: unknown): string {
-  if (
-    payload === null ||
-    typeof payload !== 'object' ||
-    !('refresh_token' in payload) ||
-    typeof payload.refresh_token !== 'string'
-  ) {
-    throw new Error('Netatmo token response carried no refresh_token');
-  }
-  return payload.refresh_token;
-}
-
-function page(title: string, text: string): string | Promise<string> {
-  // Netatmo's error strings and query parameters end up interpolated into the
-  // onboarding pages, and they arrive from the outside world. The tagged
-  // template escapes every interpolation by default, so an interpolation added
-  // later is safe whether or not its author thought about it.
-  return html`<!doctype html><meta charset="utf-8"><title>${title}</title><h1>${title}</h1><p>${text}</p>`;
 }
