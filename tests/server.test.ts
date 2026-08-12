@@ -15,6 +15,8 @@ import { createApiServer } from '../src/http/server.ts';
 import type { ApiServerDependencies, NetatmoAuthOptions } from '../src/http/server.ts';
 import type { FetchLike } from '../src/sources/netatmo.ts';
 import { loadRefreshToken } from '../src/sources/netatmo-token.ts';
+import { openLogStore } from '../src/store/logs.ts';
+import type { LogStore } from '../src/store/logs.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import type { ReadingStore } from '../src/store/readings.ts';
 
@@ -83,6 +85,7 @@ interface Overrides {
 interface TestServer {
   readonly baseUrl: string;
   readonly store: ReadingStore;
+  readonly logs: LogStore;
   readonly unit: FakeVentilationUnit;
   readonly tokenPath: string;
   readonly requests: RecordedRequest[];
@@ -90,12 +93,14 @@ interface TestServer {
 
 async function withServer(overrides: Overrides, run: (context: TestServer) => Promise<void>): Promise<void> {
   const store = openReadingStore(':memory:');
+  const logs = openLogStore(':memory:');
   const unit = createFakeUnit(40);
   const tokenPath = join(mkdtempSync(join(tmpdir(), 'server-')), 'token.json');
   const fake = scriptedFetch(overrides.script ?? []);
 
   const dependencies: ApiServerDependencies = {
     store,
+    logs,
     unit,
     netatmoAuth: {
       clientId: 'client-id',
@@ -119,6 +124,7 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
     await run({
       baseUrl: `http://127.0.0.1:${address.port}`,
       store,
+      logs,
       unit,
       tokenPath,
       requests: fake.requests,
@@ -129,6 +135,7 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
       server.closeAllConnections();
     });
     store.close();
+    logs.close();
   }
 }
 
@@ -260,6 +267,40 @@ describe('the http server', () => {
     });
   });
 
+  it('serves the log over the default last-day window, ISO in and out', async () => {
+    await withServer({}, async ({ baseUrl, logs }) => {
+      logs.append(NOW - 25 * 60 * MINUTE, 'yesterday, outside the default window');
+      logs.append(NOW - MINUTE, '50% set over the API');
+
+      const response = await fetch(`${baseUrl}/api/logs`);
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        from: toIsoUtc(NOW - 24 * 60 * MINUTE),
+        to: toIsoUtc(NOW),
+        lines: [{ at: toIsoUtc(NOW - MINUTE), message: '50% set over the API' }],
+      });
+    });
+  });
+
+  it('serves an explicit log range', async () => {
+    await withServer({}, async ({ baseUrl, logs }) => {
+      logs.append(NOW - 3 * MINUTE, 'before the range');
+      logs.append(NOW - 2 * MINUTE, 'inside it');
+
+      const from = toIsoUtc(NOW - 2 * MINUTE);
+      const to = toIsoUtc(NOW - MINUTE);
+      const response = await fetch(`${baseUrl}/api/logs?from=${from}&to=${to}`);
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        from,
+        to,
+        lines: [{ at: toIsoUtc(NOW - 2 * MINUTE), message: 'inside it' }],
+      });
+    });
+  });
+
   it('rejects what it does not know: rooms, sensors, timestamps, routes', async () => {
     await withServer({}, async ({ baseUrl }) => {
       const cases: readonly [string, number][] = [
@@ -271,6 +312,8 @@ describe('the http server', () => {
         // No zone, so it would mean a different instant on every machine.
         ['/api/rooms/bedroom/readings?from=2026-08-11T12:00:00', 400],
         ['/api/rooms/bedroom/readings?to=2026-02-31T00:00:00Z', 400],
+        // The log speaks the same grammar as every other range.
+        ['/api/logs?from=2026-08-11T12:00:00', 400],
         ['/api/nope', 404],
       ];
 

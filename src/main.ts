@@ -11,6 +11,7 @@ import { createCollector } from './sources/collector.ts';
 import { createNetatmoSource } from './sources/netatmo.ts';
 import type { SensorSource } from './sources/source.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from './sources/synthetic.ts';
+import { openLogStore } from './store/logs.ts';
 import { openReadingStore } from './store/readings.ts';
 
 // Wiring only. Every decision this file causes is made somewhere else.
@@ -42,11 +43,23 @@ function envOrUndefined(name: string): string | undefined {
   return value === undefined || value === '' ? undefined : value;
 }
 
-const log = (line: string): void => console.log(`${new Date().toISOString()}  ${line}`);
-
 const databasePath = process.env.DATABASE_PATH ?? './data/home.db';
 mkdirSync(dirname(databasePath), { recursive: true });
 const store = openReadingStore(databasePath);
+const logStore = openLogStore(databasePath);
+
+// Stdout first, the table best-effort: when SQLite itself is what is broken —
+// disk full, file locked — the database cannot carry the news of its own
+// outage, and a logging failure must never take down the work it narrates.
+const log = (line: string): void => {
+  const at = Date.now();
+  console.log(`${new Date(at).toISOString()}  ${line}`);
+  try {
+    logStore.append(at, line);
+  } catch {
+    // stdout already has the line
+  }
+};
 
 const port = Number(process.env.PORT ?? 3000);
 const netatmoTokenPath = process.env.NETATMO_TOKEN_PATH ?? './data/netatmo-token.json';
@@ -108,6 +121,7 @@ const collector = createCollector({ sources, store, log });
 
 const server = createApiServer({
   store,
+  logs: logStore,
   unit,
   netatmoAuth,
   clock: Date.now,

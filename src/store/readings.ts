@@ -28,9 +28,14 @@ CREATE TABLE IF NOT EXISTS readings (
 // is exactly the prefix a room-history query matches on, so there is no second
 // index and no denormalised room column. The test asserts the query plan, which
 // is cheap and fails loudly if someone later reorders the constraint.
+//
+// Half-open [from, to): adjacent windows tile, so a client walking
+// "00:00-06:00, 06:00-12:00" sees a reading measured exactly at 06:00 once —
+// neither dropped down a crack nor counted twice, which inclusive-both-ends
+// (the first build of this query) got wrong on the second half.
 export const RANGE_QUERY_SQL = `
 SELECT value, measured_at, received_at FROM readings
-WHERE source_id = ? AND kind = ? AND measured_at >= ? AND measured_at <= ?
+WHERE source_id = ? AND kind = ? AND measured_at >= ? AND measured_at < ?
 ORDER BY measured_at
 `;
 

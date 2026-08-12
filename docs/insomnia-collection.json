@@ -23,7 +23,11 @@
         "sensor_id": "bedroom_netatmo"
       },
       "dataPropertyOrder": {
-        "&": ["base_url", "room", "sensor_id"]
+        "&": [
+          "base_url",
+          "room",
+          "sensor_id"
+        ]
       },
       "color": null,
       "isPrivate": false,
@@ -117,7 +121,7 @@
       "_type": "request_group",
       "parentId": "wrk_microclimate",
       "name": "History",
-      "description": "Two views of the same rows: expanded from a room's sensors, or one instrument at a time.\n\n`from` and `to` are ISO 8601 instants with an explicit zone. Omitted, they default to the last 24 hours. They are echoed back in the response as UTC, so you can always see the window that was actually applied. There is no range cap: single user, trusted LAN, accepted.",
+      "description": "Two views of the same rows: expanded from a room's sensors, or one instrument at a time.\n\n`from` and `to` are ISO 8601 instants with an explicit zone. Omitted, they default to the last 24 hours. They are echoed back in the response as UTC, so you can always see the window that was actually applied. Windows are half-open — `from` included, `to` not — so adjacent windows tile without double-counting a boundary reading. There is no range cap: single user, trusted LAN, accepted.",
       "environment": {},
       "environmentPropertyOrder": null,
       "metaSortKey": 300
@@ -421,6 +425,52 @@
       "settingRebuildPath": true,
       "settingFollowRedirects": "global",
       "metaSortKey": 800
+    },
+    {
+      "_id": "fld_logs",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "The log",
+      "description": "The service log: the same lines the process writes to stdout, queryable by time range so \"what happened last night\" is a dashboard question rather than a shell one.\n\nSame range grammar as History: `from` and `to` are ISO 8601 instants with an explicit zone, defaulting to the last 24 hours, echoed back as UTC, half-open like every range here (`from` included, `to` not). Level-less and append-only, deliberately — the reasoning is in CLAUDE.md, \"The service log\".",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 350
+    },
+    {
+      "_id": "req_logs",
+      "_type": "request",
+      "parentId": "fld_logs",
+      "name": "GET /api/logs — last 24 h",
+      "description": "Poll failures, store failures, ingest verdicts, fan commands over the API — whatever the service had to say, with a timestamp. While the loop is parked this is also the durable record of when the fan level changed over the API, which is half the axis the calibration week needs.\n\nBoth parameters are disabled — enable them to narrow. A zone-less bound gets the same 400 as everywhere else; see \"the four bounds that are refused\" under History, which speak for this endpoint too.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/logs",
+      "parameters": [
+        {
+          "id": "pair_logs_from",
+          "name": "from",
+          "value": "2026-08-12T00:00:00Z",
+          "description": "ISO 8601 with a zone. Defaults to `to` minus 24 h.",
+          "disabled": true
+        },
+        {
+          "id": "pair_logs_to",
+          "name": "to",
+          "value": "2026-08-13T00:00:00Z",
+          "description": "ISO 8601 with a zone. Defaults to now.",
+          "disabled": true
+        }
+      ],
+      "body": {},
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "metaSortKey": 100
     },
     {
       "_id": "fld_unit",

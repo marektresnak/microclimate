@@ -595,6 +595,23 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - no code path deletes a reading (asserted by review, not by test — noted here so it is not
   forgotten)
 
+## `store/logs.ts`
+
+*Added 2026-08-12 with `GET /api/logs`: the lines the `log` seam carries, kept beside the
+readings so "what happened last night" is a dashboard question rather than a shell one.*
+
+- append and read back by range, half-open `[from, to)` — same rule as the readings range
+  *(both stores moved from inclusive-both-ends the same day: half-open windows are the only kind
+  that tile, and a boundary instant must land in exactly one of two adjacent windows)*
+- lines written in the same millisecond come back in the order they were written — `at` alone
+  cannot order the collector logging two sources back to back, and `rowid` breaks the tie
+- the same line twice is two events — no dedup, because nothing retries a log line
+- the generated `at_iso` renders readable ISO without storing it
+- **the range query uses the index** — asserted on `EXPLAIN QUERY PLAN` like the readings query.
+  The index is explicit here, where the readings table borrows its own from the dedup constraint,
+  so this is also what notices if it is dropped.
+- no code path deletes a line (asserted by review, not by test — same note as the readings)
+
 ## `actuator/modbus-tcp.ts`
 
 - 50% encodes to register value 500; 500 decodes to 50%
@@ -705,6 +722,12 @@ what was added instead:*
   *Trimmed 2026-08-12: the 10-minute state expiry is removed. The single-use exact-match state
   check is the CSRF defence and stays; the wall-clock deadline on top of it guarded against
   nothing any caller does, and only its own test ever consumed it.*
+
+*Added 2026-08-12, with the log store:*
+
+- `GET /api/logs` serves the stored log over the default last-day window, ISO in and out, and
+  honours an explicit `?from=&to=`; a zone-less bound gets the same 400 as everywhere else — the
+  log speaks the one range grammar the history endpoints already speak
 
 ---
 

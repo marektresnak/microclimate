@@ -291,7 +291,8 @@ through a narrowing function.
 
 ## Data model and storage
 
-**One table.** Every reading is a fact that was true at a point in time, from a named instrument.
+**One table of readings.** Every reading is a fact that was true at a point in time, from a named
+instrument. (The service log keeps a second, append-only table beside it — its own section below.)
 
 ```sql
 CREATE TABLE readings (
@@ -308,8 +309,8 @@ CREATE TABLE readings (
 
 **No `room_id` column.** The room is a property of the instrument, and the app knows the
 room → sources mapping from config. "Bedroom CO₂" is
-`WHERE source_id IN (...) AND kind = ? AND measured_at BETWEEN ? AND ?` — a prefix match on the
-UNIQUE constraint's implicit index. Verified:
+`WHERE source_id IN (...) AND kind = ? AND measured_at >= ? AND measured_at < ?` — a prefix match
+on the UNIQUE constraint's implicit index. Verified:
 
 ```
 SEARCH readings USING INDEX sqlite_autoindex_readings_1 (source_id=? AND kind=? AND measured_at>?)
@@ -361,7 +362,7 @@ Never store a value in anything else. Conversion happens in the adapter, at the 
 only CO₂ drives the unit. Collection is the point of the system — do not "optimise" the unused
 kinds away.
 
-**There is no second table.** The controller's working state — last commanded level, when it last
+**There is no state table.** The controller's working state — last commanded level, when it last
 changed, whether the previous cycle was asleep — lives in memory and is lost on restart. A restart
 therefore acts immediately rather than waiting out a dwell period.
 
@@ -372,6 +373,37 @@ unreadable row is an error rather than a first run — two guards protecting one
 are removed.** The database is now append-only with no mutable row in it at all, which is a
 property worth more than the failure mode it gives up. A service that crash-loops is a problem to
 fix, not a problem to rate-limit.
+
+## The service log — the second table, deliberately
+
+Added 2026-08-12 so "what happened last night" is a dashboard question rather than a shell one:
+this service is operated from its API, and the log was the one thing still requiring a login to
+the machine. Every line the `log` seam carries — poll failures, store failures, ingest verdicts,
+fan commands over the API — goes to stdout as before **and**, best-effort, into a `logs` table in
+the same database file. `GET /api/logs` serves it back.
+
+- **Append-only, like everything else in the file.** A log line is a fact about a point in time;
+  the no-mutable-row property that `control_state` died for is untouched.
+- **stdout stays, and the table write is best-effort** — stdout first, a failed insert swallowed.
+  When SQLite itself is what is broken (disk full, file locked), the database cannot carry the
+  news of its own outage, and a logging failure must never take down the work it was narrating.
+- **No severity column.** The lines carry no level today, and a taxonomy invented for a few
+  hundred lines a day serves no consumer — a time range and an eye find everything. If a
+  dashboard later needs to filter errors, the column arrives together with every call site
+  classified, not before. (Decided with the feature, 2026-08-12.)
+- **No dedup, no uniqueness constraint.** Nothing retries a log line; two identical lines a
+  minute apart are two events, not a duplicate. The range index is therefore explicit, where the
+  readings table gets its own free from the dedup constraint. Ties inside one millisecond come
+  back in the order they were written — `rowid` breaks them, because the collector can log two
+  sources back to back.
+- **Nothing prunes it**, consistent with the readings table — tens of megabytes a year at current
+  volume. When retention is built it is the easiest target there is, a plain DELETE below a
+  cutoff with no rollup to wait for, and it joins the same six-month revisit.
+
+While the loop is parked, the log is also the durable record of when the fan level changed over
+the API — `"70% set over the API"` next to the CO₂ curve it explains, which is half the axis the
+calibration week needs. Wall-panel changes stay invisible here: nothing polls the unit while the
+loop is parked, so the log records what the service did and was told, not what the panel did.
 
 ## Topology lives in config, not the database
 
@@ -490,6 +522,7 @@ Two views of the same data, and one rule shared between them.
 | `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config, inactive ones included, `?from=&to=` as ISO 8601 (default last 24 h), `?kind=` to filter. |
 | `GET /api/sensors` | The config topology, so a client can interpret ids without reading files. |
 | `GET /api/sensors/:id/readings` | Per-instrument detail, when you want to see the raw instrument. |
+| `GET /api/logs` | The service log — the same lines stdout gets, `?from=&to=` as ISO 8601 (default last 24 h). Level-less and append-only; see "The service log" in the data-model section. |
 | `GET /api/unit/level` | The fan's actual level, read live over Modbus. This is how a wall-panel change stays visible while the loop's read-every-tick is parked. |
 | `POST /api/unit/level` | Sets the fan. `assertCommandedLevel` refuses 90 and 100. **Deliberately unauthenticated** — see below. |
 | `POST /api/readings` | Batch ingest for the push nodes: a JSON array of readings, each with its own ISO 8601 `measuredAt`. Future rejected beyond 5 min of skew, any past accepted, replay idempotent. **Also unauthenticated** — same decision below. |
@@ -516,6 +549,11 @@ you have to go and paste somewhere to understand.
   month 13, hour 25 and minute 61 on its own, but silently rolls `2026-02-31` forward into March.
   Day of the month is the only field that does that, and `domain/time.ts` rebuilds the date to
   catch it.
+- **Ranges are half-open: `from` is included, `to` is not** (2026-08-12, on every range endpoint).
+  Half-open windows are the only kind that tile — a client walking `00:00–06:00, 06:00–12:00`
+  sees a reading measured exactly at 06:00 once. The first build was inclusive on both ends,
+  which has no crack for a boundary reading to fall down but counts it in *both* windows, and a
+  duplicate in a walked history is the same quiet poison the ingest dedup exists to keep out.
 
 There is no range cap — single user, trusted LAN, accepted.
 
@@ -590,8 +628,11 @@ src/
     http.ts             batch validation and storage for POST /api/readings;
                         the route itself lives in http/server.ts
   store/
+    logs.ts             the service log behind GET /api/logs — what the `log`
+                        seam carries, append-only, level-less. The second
+                        table, and the whole of why it exists is in the
+                        data-model section.
     readings.ts         node:sqlite; append-only, no pruning path exists yet.
-                        The only table there is.
   control/              policy, limiter and the loop are PARKED — built, tested,
                         not wired; see the section up top. freshness stays live:
                         /api/state judges readings through it via precedence.

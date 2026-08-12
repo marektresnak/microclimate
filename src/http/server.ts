@@ -22,6 +22,7 @@ import { parseInstant, toIsoUtc } from '../domain/time.ts';
 import { NETATMO_TOKEN_URL } from '../sources/netatmo.ts';
 import type { FetchLike } from '../sources/netatmo.ts';
 import { saveRefreshToken } from '../sources/netatmo-token.ts';
+import type { LogLine, LogStore } from '../store/logs.ts';
 import type { ReadingStore } from '../store/readings.ts';
 
 /**
@@ -69,6 +70,7 @@ export interface NetatmoAuthOptions {
 
 export interface ApiServerDependencies {
   readonly store: ReadingStore;
+  readonly logs: LogStore;
   readonly unit: VentilationUnit;
   /** Unset disables the two /auth/netatmo routes, with an explanation. */
   readonly netatmoAuth: NetatmoAuthOptions | undefined;
@@ -182,6 +184,20 @@ export function createApiServer(
     if ('error' in result) return c.json(result, 400);
 
     return c.json({ sensorId, ...result });
+  });
+
+  // The same lines the process writes to stdout, queryable by time range —
+  // so "what happened last night" is a dashboard question, not a shell one.
+  // Same grammar as every other range: ISO 8601 with a zone, default last 24 h.
+  app.get('/api/logs', (c) => {
+    const range = rangeOf(c.req.query('from'), c.req.query('to'), dependencies.clock());
+    if ('error' in range) return c.json(range, 400);
+
+    return c.json({
+      from: toIsoUtc(range.from),
+      to: toIsoUtc(range.to),
+      lines: dependencies.logs.linesInRange(range.from, range.to).map(describeLogLine),
+    });
   });
 
   app.get('/api/unit/level', async (c) => {
@@ -444,6 +460,10 @@ function describeReading(reading: Reading): ReadingBody {
     measuredAt: toIsoUtc(reading.measuredAt),
     receivedAt: toIsoUtc(reading.receivedAt),
   };
+}
+
+function describeLogLine(line: LogLine): { at: string; message: string } {
+  return { at: toIsoUtc(line.at), message: line.message };
 }
 
 function refreshTokenOf(payload: unknown): string {
