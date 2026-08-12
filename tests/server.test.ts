@@ -19,6 +19,7 @@ import { openLogStore } from '../src/store/logs.ts';
 import type { LogStore } from '../src/store/logs.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import type { ReadingStore } from '../src/store/readings.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 // The tests listen on a loopback ephemeral port and talk to it with fetch —
 // the same precedent the Modbus socket tests set. "No network" means nothing
@@ -152,7 +153,7 @@ describe('the http server', () => {
       const response = await fetch(`${baseUrl}/health`);
 
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { ok: true });
+      assertDeepEqual(await response.json(), { ok: true });
     });
   });
 
@@ -174,7 +175,7 @@ describe('the http server', () => {
       // The whole shape, pinned: every configured (room, kind) pair answers,
       // and the bedroom temperature is exactly what resolveSignal said —
       // "one implementation, two consumers" as a property, not a promise.
-      assert.deepEqual(body, {
+      assertDeepEqual(body, {
         rooms: {
           living_room: {
             temperature: { status: 'missing' },
@@ -237,7 +238,7 @@ describe('the http server', () => {
       const response = await fetch(`${baseUrl}/api/rooms/kids_room/readings?from=${from}&to=${toIsoUtc(NOW)}`);
 
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), {
+      assertDeepEqual(await response.json(), {
         room: 'kids_room',
         from,
         to: toIsoUtc(NOW),
@@ -257,7 +258,7 @@ describe('the http server', () => {
       const body = await response.json();
 
       assert.equal(response.status, 200);
-      assert.deepEqual(body, {
+      assertDeepEqual(body, {
         sensorId: 'bedroom_netatmo',
         from: toIsoUtc(NOW.subtract({ hours: 24 })),
         to: toIsoUtc(NOW),
@@ -274,7 +275,7 @@ describe('the http server', () => {
       const response = await fetch(`${baseUrl}/api/logs`);
 
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), {
+      assertDeepEqual(await response.json(), {
         from: toIsoUtc(NOW.subtract({ hours: 24 })),
         to: toIsoUtc(NOW),
         lines: [{ at: toIsoUtc(NOW.subtract({ minutes: 1 })), message: '50% set over the API' }],
@@ -292,7 +293,7 @@ describe('the http server', () => {
       const response = await fetch(`${baseUrl}/api/logs?from=${from}&to=${to}`);
 
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), {
+      assertDeepEqual(await response.json(), {
         from,
         to,
         lines: [{ at: toIsoUtc(NOW.subtract({ minutes: 2 })), message: 'inside it' }],
@@ -327,7 +328,7 @@ describe('the http server', () => {
     await withServer({}, async ({ baseUrl, unit }) => {
       unit.level = 60;
       const healthy = await fetch(`${baseUrl}/api/unit/level`);
-      assert.deepEqual(await healthy.json(), { level: 60 });
+      assertDeepEqual(await healthy.json(), { level: 60 });
 
       unit.failReads = true;
       const failing = await fetch(`${baseUrl}/api/unit/level`);
@@ -342,8 +343,8 @@ describe('the http server', () => {
       const response = await postLevel(baseUrl, JSON.stringify({ level: 50 }));
 
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { level: 50 });
-      assert.deepEqual(unit.commands, [50]);
+      assertDeepEqual(await response.json(), { level: 50 });
+      assertDeepEqual(unit.commands, [50]);
       assert.equal(unit.level, 50);
     });
   });
@@ -361,7 +362,7 @@ describe('the http server', () => {
       const wrongShape = await postLevel(baseUrl, JSON.stringify({ level: 'high' }));
       assert.equal(wrongShape.status, 400);
 
-      assert.deepEqual(unit.commands, []);
+      assertDeepEqual(unit.commands, []);
     });
   });
 
@@ -387,10 +388,10 @@ describe('the http server', () => {
       });
 
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { stored: 1, duplicates: 0, rejected: [] });
+      assertDeepEqual(await response.json(), { stored: 1, duplicates: 0, rejected: [] });
 
       const readBack = await fetch(`${baseUrl}/api/sensors/bedroom_netatmo/readings?kind=co2`);
-      assert.deepEqual(await readBack.json(), {
+      assertDeepEqual(await readBack.json(), {
         sensorId: 'bedroom_netatmo',
         from: toIsoUtc(NOW.subtract({ hours: 24 })),
         to: toIsoUtc(NOW),
@@ -420,7 +421,7 @@ describe('the http server', () => {
         headers: { 'content-type': 'application/json' },
         body: batch,
       });
-      assert.deepEqual(await ingested.json(), { stored: 1, duplicates: 0, rejected: [] });
+      assertDeepEqual(await ingested.json(), { stored: 1, duplicates: 0, rejected: [] });
 
       // Asked for over a window written in a third zone, to make the point that
       // no part of this depends on which spelling arrived.
@@ -428,7 +429,7 @@ describe('the http server', () => {
         `${baseUrl}/api/sensors/bedroom_netatmo/readings?kind=co2&from=2026-08-11T06:00:00-05:00`,
       );
 
-      assert.deepEqual(await readBack.json(), {
+      assertDeepEqual(await readBack.json(), {
         sensorId: 'bedroom_netatmo',
         // Echoed in UTC, so the window that was actually applied is visible.
         from: '2026-08-11T11:00:00.000Z',

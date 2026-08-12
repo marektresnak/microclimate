@@ -28,12 +28,14 @@ read as sentences.
 - `node:test` + `node:assert/strict`. No framework.
 - **Time is a parameter.** No clock read inside any logic under test. A fixed `now` — a
   `Temporal.Instant` since 2026-08-12 — is passed in, so no test sleeps and no test is flaky.
-- **Instants never meet a bare `deepEqual`.** An instant's state lives in internal slots that
-  `assert.deepEqual` cannot see, so two *different* instants compare as deeply equal and a wrong
-  timestamp passes silently. Instants and instant-bearing shapes are asserted through
-  `tests/support/deep-equal.ts`, which writes instants out as ISO strings first — the expected
-  side can simply be the written-out string. Raw `epochMilliseconds` appears only where the
-  number itself is the contract (millisecond truncation, the vendor's epoch seconds, raw SQL).
+- **`assertDeepEqual` is the only deep assertion, enforced by `conventions.test.ts`.** An
+  instant's state lives in internal slots that `assert.deepEqual` cannot see, so two *different*
+  instants compare as deeply equal and a wrong timestamp passes silently. The wrapper in
+  `tests/support/deep-equal.ts` writes instants out as ISO strings first — the expected side can
+  simply be the written-out string — and passes instant-free data through untouched, so the ban
+  on the bare call is total and mechanical: the conventions test scans the suite and turns a
+  forgotten import into a red build. Raw `epochMilliseconds` appears only where the number
+  itself is the contract (millisecond truncation, the vendor's epoch seconds, raw SQL).
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings. Nothing asserts on call counts of a mocking library.
 - **Table-driven** where cases are uniform (freshness windows, zone spellings); individually

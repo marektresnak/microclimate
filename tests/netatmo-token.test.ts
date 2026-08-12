@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { loadRefreshToken, saveRefreshToken } from '../src/sources/netatmo-token.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 function temporaryPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'netatmo-token-')), 'token.json');
@@ -71,6 +72,6 @@ describe('the netatmo token file', () => {
 
     // The rename landed: the target parses, and what it holds is the token.
     const onDisk: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    assert.deepEqual(onDisk, { refreshToken: 'abc' });
+    assertDeepEqual(onDisk, { refreshToken: 'abc' });
   });
 });

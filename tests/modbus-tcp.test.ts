@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { createModbusUnit } from '../src/actuator/modbus-tcp.ts';
 import type { ByteStream, ModbusUnitOptions, OpenStream } from '../src/actuator/modbus-tcp.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 // Short enough that the two tests which wait a timeout out wait a tenth of a
 // second — but not shorter, because the budget is measured on the real clock
@@ -97,7 +98,7 @@ describe('writing a level', () => {
 
     await unitOver(fake).set(50);
 
-    assert.deepEqual(
+    assertDeepEqual(
       Array.from(fake.sent[0] ?? []),
       [
         0x00, 0x01, // transaction id
@@ -118,8 +119,8 @@ describe('writing a level', () => {
     await unit.set(20);
     await unit.set(80);
 
-    assert.deepEqual(Array.from((fake.sent[0] ?? []).slice(10)), [0x00, 0xc8]); // 200
-    assert.deepEqual(Array.from((fake.sent[1] ?? []).slice(10)), [0x03, 0x20]); // 800
+    assertDeepEqual(Array.from((fake.sent[0] ?? []).slice(10)), [0x00, 0xc8]); // 200
+    assertDeepEqual(Array.from((fake.sent[1] ?? []).slice(10)), [0x03, 0x20]); // 800
   });
 
   it('gives every request a new transaction id', async () => {
@@ -131,8 +132,8 @@ describe('writing a level', () => {
     await unit.set(30);
     await unit.set(40);
 
-    assert.deepEqual(Array.from((fake.sent[0] ?? []).slice(0, 2)), [0x00, 0x01]);
-    assert.deepEqual(Array.from((fake.sent[1] ?? []).slice(0, 2)), [0x00, 0x02]);
+    assertDeepEqual(Array.from((fake.sent[0] ?? []).slice(0, 2)), [0x00, 0x01]);
+    assertDeepEqual(Array.from((fake.sent[1] ?? []).slice(0, 2)), [0x00, 0x02]);
   });
 
   it('refuses a level above the ceiling even with the types stripped', async () => {
@@ -140,7 +141,7 @@ describe('writing a level', () => {
     const bypassingTheTypes: { set(level: number): Promise<void> } = unitOver(fake);
 
     await assert.rejects(bypassingTheTypes.set(100), /not a commandable level/);
-    assert.deepEqual(fake.sent, []);
+    assertDeepEqual(fake.sent, []);
   });
 
   it('does not report success when the unit echoes something else', async () => {
@@ -160,7 +161,7 @@ describe('reading the level back', () => {
 
     await unitOver(fake).read();
 
-    assert.deepEqual(
+    assertDeepEqual(
       Array.from(fake.sent[0] ?? []),
       [0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x52, 0x09, 0x00, 0x01],
     );
@@ -211,11 +212,11 @@ describe('connections', () => {
     // the `finally { stream.close() }` passes the whole suite.
     const succeeding = fakeStreams(echo);
     await unitOver(succeeding).set(50);
-    assert.deepEqual(succeeding.counts, { opened: 1, closed: 1 });
+    assertDeepEqual(succeeding.counts, { opened: 1, closed: 1 });
 
     const failing = fakeStreams(() => []);
     await assert.rejects(unitOver(failing, { ...OPTIONS, retries: 2 }).set(50));
-    assert.deepEqual(failing.counts, { opened: 3, closed: 3 });
+    assertDeepEqual(failing.counts, { opened: 3, closed: 3 });
   });
 
   it('spends its timeout once per attempt, not once per phase', async () => {

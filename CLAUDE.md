@@ -660,16 +660,18 @@ been spoken.
 
 - **Time is injected**, never read from a clock inside logic. `now` arrives as a
   `Temporal.Instant` parameter; only `main.ts` calls `Temporal.Now.instant()`.
-- **Instants and `deepEqual` do not mix.** A `Temporal.Instant` keeps its state in internal
-  slots, which `assert.deepEqual` cannot see — two *different* instants compare as deeply equal,
-  so a wrong timestamp passes silently. Every assertion on an instant or an instant-bearing
-  shape goes through `tests/support/deep-equal.ts`, which writes the instants out as ISO strings
-  first — so the expected side can simply be the written-out string:
-  `assertDeepEqual(row.measuredAt, '2026-08-07T00:00:00Z')`. Raw `epochMilliseconds` appears
-  only where the number itself is the contract: the millisecond-truncation tests, the vendor's
-  seconds-to-milliseconds conversion, and the raw-SQL schema tests. A bare `assert.deepEqual` on
-  anything carrying an instant is a bug, and it is the one way this suite can go green while
-  checking nothing.
+- **`assertDeepEqual` is the only deep assertion, and a test enforces it.** A `Temporal.Instant`
+  keeps its state in internal slots, which `assert.deepEqual` cannot see — two *different*
+  instants compare as deeply equal, so a wrong timestamp passes silently, the one way this suite
+  could go green while checking nothing. The project wrapper in `tests/support/deep-equal.ts`
+  writes instants out as ISO strings first (so the expected side can simply be the written-out
+  string: `assertDeepEqual(row.measuredAt, '2026-08-07T00:00:00Z')`) and passes everything else
+  through untouched — a drop-in superset of the bare call. That makes the rule total rather than
+  a judgement about which shapes carry an instant, and `tests/conventions.test.ts` scans the
+  suite and fails on any bare `assert.deepEqual`, so forgetting is a red build, not a silent
+  green. Raw `epochMilliseconds` appears only where the number itself is the contract: the
+  millisecond-truncation tests, the vendor's seconds-to-milliseconds conversion, and the raw-SQL
+  schema tests.
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings.
 - **The cases that matter** are the failure ones: a sensor going stale mid-run, Netatmo

@@ -8,6 +8,7 @@ import { createNetatmoSource } from '../src/sources/netatmo.ts';
 import type { FetchLike, NetatmoOptions } from '../src/sources/netatmo.ts';
 import { loadRefreshToken, saveRefreshToken } from '../src/sources/netatmo-token.ts';
 import { openReadingStore } from '../src/store/readings.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 const NOW = Temporal.Instant.from('2026-08-11T12:00:00Z');
 // Deliberately unlike NOW, so a test can tell the vendor's clock from ours.
@@ -101,7 +102,7 @@ describe('the netatmo source', () => {
 
     const readings = await source.poll(NOW);
 
-    assert.deepEqual(
+    assertDeepEqual(
       readings.map((reading) => [reading.sourceId, reading.kind, reading.value]).sort(),
       [
         ['bedroom_netatmo', 'co2', 842],
@@ -153,7 +154,7 @@ describe('the netatmo source', () => {
     assert.equal(readings.find((reading) => reading.kind === 'co2')?.value, 910);
     // The conversation, in order: bootstrap refresh, data, expired data,
     // refresh, retried data — and nothing after.
-    assert.deepEqual(
+    assertDeepEqual(
       fake.requests.map((request) => request.method),
       ['POST', 'GET', 'GET', 'POST', 'GET'],
     );

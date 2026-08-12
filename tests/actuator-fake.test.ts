@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { createFakeUnit } from '../src/actuator/fake.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 describe('the fake unit', () => {
   it('records what it was told and reports it back', async () => {
@@ -9,7 +10,7 @@ describe('the fake unit', () => {
 
     await unit.set(60);
 
-    assert.deepEqual(unit.commands, [60]);
+    assertDeepEqual(unit.commands, [60]);
     assert.equal(await unit.read(), 60);
   });
 
@@ -19,7 +20,7 @@ describe('the fake unit', () => {
     unit.level = 100;
 
     assert.equal(await unit.read(), 100);
-    assert.deepEqual(unit.commands, []);
+    assertDeepEqual(unit.commands, []);
   });
 
   it('surfaces a write failure rather than swallowing it', async () => {
@@ -29,7 +30,7 @@ describe('the fake unit', () => {
     unit.failWrites = true;
 
     await assert.rejects(unit.set(50), /modbus write/);
-    assert.deepEqual(unit.commands, []);
+    assertDeepEqual(unit.commands, []);
   });
 
   it('refuses a level above the ceiling even when the types have been stripped', async () => {

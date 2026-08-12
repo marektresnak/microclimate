@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { PRECEDENCE, ROOM_IDS, SENSORS } from '../src/config.ts';
 import { MEASUREMENT_KINDS } from '../src/domain/measurement.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
 describe('topology', () => {
   it('ranks every sensor for every kind it reports', () => {
@@ -69,9 +70,9 @@ describe('topology', () => {
   it('has no CO2 instrument outside the bedroom yet', () => {
     // Not an aspiration — a fact that shapes the tests. Living-room CO2 is
     // genuinely `missing` until a SEN66 is installed.
-    assert.deepEqual(PRECEDENCE.living_room.co2, undefined);
-    assert.deepEqual(PRECEDENCE.kids_room.co2, undefined);
-    assert.deepEqual(PRECEDENCE.bedroom.co2, ['bedroom_netatmo']);
+    assertDeepEqual(PRECEDENCE.living_room.co2, undefined);
+    assertDeepEqual(PRECEDENCE.kids_room.co2, undefined);
+    assertDeepEqual(PRECEDENCE.bedroom.co2, ['bedroom_netatmo']);
   });
 
   it('gives Netatmo a window wide enough for two of its own refreshes', () => {

@@ -110,7 +110,7 @@ describe('the readings store', () => {
 
     const history = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
 
-    assert.deepEqual(
+    assertDeepEqual(
       history.map((stored) => stored.value),
       [400, 845],
     );
@@ -148,7 +148,7 @@ describe('the readings store', () => {
       NOW.subtract({ minutes: 1 }),
     );
 
-    assert.deepEqual(
+    assertDeepEqual(
       window.map((stored) => stored.value),
       [812],
     );

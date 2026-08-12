@@ -57,7 +57,7 @@ describe('ingest', () => {
 
     const outcome = ingest(store, nineReadings());
 
-    assert.deepEqual(outcome, { stored: 9, duplicates: 0, rejected: [] });
+    assertDeepEqual(outcome, { stored: 9, duplicates: 0, rejected: [] });
     assert.equal(store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW).length, 3);
 
     store.close();
@@ -69,7 +69,7 @@ describe('ingest', () => {
     ingest(store, nineReadings());
     const replay = ingest(store, nineReadings());
 
-    assert.deepEqual(replay, { stored: 0, duplicates: 9, rejected: [] });
+    assertDeepEqual(replay, { stored: 0, duplicates: 9, rejected: [] });
     assert.equal(store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW).length, 3);
 
     store.close();
@@ -86,7 +86,7 @@ describe('ingest', () => {
     ];
     const outcome = ingest(store, someOldSomeNew);
 
-    assert.deepEqual(outcome, { stored: 2, duplicates: 4, rejected: [] });
+    assertDeepEqual(outcome, { stored: 2, duplicates: 4, rejected: [] });
 
     store.close();
   });
@@ -110,7 +110,7 @@ describe('ingest', () => {
     const store = openReadingStore(':memory:');
 
     const atTheEdge = ingest(store, [co2(840, NOW.add({ minutes: 5 }))]);
-    assert.deepEqual(atTheEdge, { stored: 1, duplicates: 0, rejected: [] });
+    assertDeepEqual(atTheEdge, { stored: 1, duplicates: 0, rejected: [] });
 
     const beyondIt = ingest(store, [co2(840, NOW.add({ minutes: 5, milliseconds: 1 }))]);
     assert.equal('rejected' in beyondIt && beyondIt.rejected[0]?.index, 0);
@@ -126,7 +126,7 @@ describe('ingest', () => {
 
     const outcome = ingest(store, [co2(840, twelveHoursAgo), co2(700, yearsAgo)], NOW);
 
-    assert.deepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
+    assertDeepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
     const backlog = store.readingsInRange('bedroom_netatmo', 'co2', yearsAgo, NOW);
     // Original measurement time, today's arrival time — never conflated.
     assertDeepEqual(backlog[0]?.measuredAt, yearsAgo);
@@ -148,8 +148,8 @@ describe('ingest', () => {
     // One moment, two spellings. The offset is resolved at the edge, so the
     // store only ever sees the number and the uniqueness constraint catches the
     // second as the duplicate it is — which is why accepting both costs nothing.
-    assert.deepEqual(asUtc, { stored: 1, duplicates: 0, rejected: [] });
-    assert.deepEqual(asPrague, { stored: 0, duplicates: 1, rejected: [] });
+    assertDeepEqual(asUtc, { stored: 1, duplicates: 0, rejected: [] });
+    assertDeepEqual(asPrague, { stored: 0, duplicates: 1, rejected: [] });
 
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
     assert.equal(rows.length, 1);
@@ -180,7 +180,7 @@ describe('ingest', () => {
     // edge, so what reaches the column is a single number and the uniqueness
     // constraint sees a single reading — which is why accepting offsets at all
     // costs nothing.
-    assert.deepEqual(outcome, { stored: 1, duplicates: 8, rejected: [] });
+    assertDeepEqual(outcome, { stored: 1, duplicates: 8, rejected: [] });
 
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
     assert.equal(rows.length, 1);
@@ -200,7 +200,7 @@ describe('ingest', () => {
       { sourceId: 'bedroom_netatmo', kind: 'co2', value: 705, measuredAt: '2026-08-06T12:00:00-12:00' },
     ]);
 
-    assert.deepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
+    assertDeepEqual(outcome, { stored: 2, duplicates: 0, rejected: [] });
 
     const rows = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
     assertDeepEqual(
@@ -217,7 +217,7 @@ describe('ingest', () => {
 
     const outcome = ingest(store, batch);
 
-    assert.deepEqual(outcome, {
+    assertDeepEqual(outcome, {
       stored: 9,
       duplicates: 0,
       rejected: [{ index: 9, reason: 'value must be a finite number' }],
@@ -237,7 +237,7 @@ describe('ingest', () => {
       { sourceId: 'bedroom_netatmo', kind: 'pm2_5', value: 4, measuredAt: toIsoUtc(NOW) },
     ]);
 
-    assert.deepEqual(outcome, {
+    assertDeepEqual(outcome, {
       stored: 0,
       duplicates: 0,
       rejected: [
@@ -270,7 +270,7 @@ describe('ingest', () => {
 
     // The STRICT table would have thrown on several of these — but its error
     // names a column and fails the whole transaction; these name a reading.
-    assert.deepEqual(outcome, {
+    assertDeepEqual(outcome, {
       stored: 0,
       duplicates: 0,
       rejected: [
@@ -291,8 +291,8 @@ describe('ingest', () => {
   it('is an error, not a batch, when the body is not an array', () => {
     const store = openReadingStore(':memory:');
 
-    assert.deepEqual(ingest(store, { readings: [] }), { error: 'expected a JSON array of readings' });
-    assert.deepEqual(ingest(store, 'co2'), { error: 'expected a JSON array of readings' });
+    assertDeepEqual(ingest(store, { readings: [] }), { error: 'expected a JSON array of readings' });
+    assertDeepEqual(ingest(store, 'co2'), { error: 'expected a JSON array of readings' });
 
     store.close();
   });
@@ -300,7 +300,7 @@ describe('ingest', () => {
   it('accepts an empty batch as a no-op', () => {
     const store = openReadingStore(':memory:');
 
-    assert.deepEqual(ingest(store, []), { stored: 0, duplicates: 0, rejected: [] });
+    assertDeepEqual(ingest(store, []), { stored: 0, duplicates: 0, rejected: [] });
 
     store.close();
   });
@@ -313,7 +313,7 @@ describe('ingest', () => {
 
     // Stored, not rejected: a drifted instrument is still reporting real air
     // with a shifted zero, and the low reading is the evidence of the fault.
-    assert.deepEqual(outcome, { stored: 1, duplicates: 0, rejected: [] });
+    assertDeepEqual(outcome, { stored: 1, duplicates: 0, rejected: [] });
     assert.match(log.lines.join('\n'), /250 ppm CO2, below outdoor air/);
 
     store.close();

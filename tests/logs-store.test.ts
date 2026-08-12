@@ -33,7 +33,7 @@ describe('the log store', () => {
     store.append(NOW, 'second');
     store.append(NOW, 'third');
 
-    assert.deepEqual(
+    assertDeepEqual(
       store.linesInRange(NOW, NOW.add({ milliseconds: 1 })).map((line) => line.message),
       ['first', 'second', 'third'],
     );
@@ -62,7 +62,7 @@ describe('the log store', () => {
 
     const window = store.linesInRange(NOW.subtract({ minutes: 2 }), NOW.subtract({ minutes: 1 }));
 
-    assert.deepEqual(
+    assertDeepEqual(
       window.map((line) => line.message),
       ['on the from bound'],
     );
