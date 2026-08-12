@@ -1,32 +1,35 @@
-import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { SensorId } from '../src/config.ts';
 import type { MeasurementKind, Reading } from '../src/domain/measurement.ts';
 import { resolveSignal } from '../src/domain/precedence.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
-const NOW = Date.UTC(2026, 7, 10, 12, 0, 0);
-const SECOND = 1_000;
-const MINUTE = 60_000;
+const NOW = Temporal.Instant.from('2026-08-10T12:00:00Z');
 
-function reading(sourceId: SensorId, kind: MeasurementKind, value: number, ageMs: number): Reading {
-  return { sourceId, kind, value, measuredAt: NOW - ageMs, receivedAt: NOW };
+function reading(
+  sourceId: SensorId,
+  kind: MeasurementKind,
+  value: number,
+  age: Temporal.DurationLike,
+): Reading {
+  return { sourceId, kind, value, measuredAt: NOW.subtract(age), receivedAt: NOW };
 }
 
 describe('precedence', () => {
   it('lets the highest-ranked fresh source win, and names it', () => {
     const readings = [
-      reading('kids_room_tado_left', 'temperature', 21.5, 20 * SECOND),
-      reading('kids_room_tado_right', 'temperature', 23.1, 20 * SECOND),
+      reading('kids_room_tado_left', 'temperature', 21.5, { seconds: 20 }),
+      reading('kids_room_tado_right', 'temperature', 23.1, { seconds: 20 }),
     ];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
       status: 'fresh',
       sourceId: 'kids_room_tado_left',
       // Exactly one instrument's reading, never a mean of the two. The valves
       // sit next to different radiators; an average describes neither.
       value: 21.5,
-      measuredAt: NOW - 20 * SECOND,
+      measuredAt: NOW.subtract({ seconds: 20 }),
     });
   });
 
@@ -34,29 +37,29 @@ describe('precedence', () => {
     // The lower-ranked valve reported one second ago and the higher-ranked one
     // a minute ago. Both are fresh, so trust decides, not recency.
     const readings = [
-      reading('kids_room_tado_left', 'temperature', 21.5, 60 * SECOND),
-      reading('kids_room_tado_right', 'temperature', 23.1, 1 * SECOND),
+      reading('kids_room_tado_left', 'temperature', 21.5, { seconds: 60 }),
+      reading('kids_room_tado_right', 'temperature', 23.1, { seconds: 1 }),
     ];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
       status: 'fresh',
       sourceId: 'kids_room_tado_left',
       value: 21.5,
-      measuredAt: NOW - 60 * SECOND,
+      measuredAt: NOW.subtract({ seconds: 60 }),
     });
   });
 
   it('falls through to the next source when the first has gone stale', () => {
     const readings = [
-      reading('kids_room_tado_left', 'temperature', 21.5, 10 * MINUTE),
-      reading('kids_room_tado_right', 'temperature', 23.1, 20 * SECOND),
+      reading('kids_room_tado_left', 'temperature', 21.5, { minutes: 10 }),
+      reading('kids_room_tado_right', 'temperature', 23.1, { seconds: 20 }),
     ];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
       status: 'fresh',
       sourceId: 'kids_room_tado_right',
       value: 23.1,
-      measuredAt: NOW - 20 * SECOND,
+      measuredAt: NOW.subtract({ seconds: 20 }),
     });
   });
 
@@ -66,15 +69,15 @@ describe('precedence', () => {
     // choice, only the question of the best remaining information — which is
     // the newest reading, not the most trusted dead one.
     const readings = [
-      reading('kids_room_tado_left', 'temperature', 21.5, 40 * MINUTE),
-      reading('kids_room_tado_right', 'temperature', 23.1, 5 * MINUTE),
+      reading('kids_room_tado_left', 'temperature', 21.5, { minutes: 40 }),
+      reading('kids_room_tado_right', 'temperature', 23.1, { minutes: 5 }),
     ];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
       status: 'stale',
       sourceId: 'kids_room_tado_right',
       value: 23.1,
-      measuredAt: NOW - 5 * MINUTE,
+      measuredAt: NOW.subtract({ minutes: 5 }),
     });
   });
 
@@ -83,15 +86,15 @@ describe('precedence', () => {
     // reading was also the last one in the list, so "newest" and "whichever we
     // looked at last" are the same answer. Only this direction can tell them apart.
     const readings = [
-      reading('kids_room_tado_left', 'temperature', 21.5, 5 * MINUTE),
-      reading('kids_room_tado_right', 'temperature', 23.1, 40 * MINUTE),
+      reading('kids_room_tado_left', 'temperature', 21.5, { minutes: 5 }),
+      reading('kids_room_tado_right', 'temperature', 23.1, { minutes: 40 }),
     ];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
       status: 'stale',
       sourceId: 'kids_room_tado_left',
       value: 21.5,
-      measuredAt: NOW - 5 * MINUTE,
+      measuredAt: NOW.subtract({ minutes: 5 }),
     });
   });
 
@@ -103,15 +106,15 @@ describe('precedence', () => {
     // The lower-ranked valve is listed first here so that array order cannot be
     // what produces the right answer.
     const readings = [
-      reading('kids_room_tado_right', 'temperature', 23.1, 40 * MINUTE),
-      reading('kids_room_tado_left', 'temperature', 21.5, 40 * MINUTE),
+      reading('kids_room_tado_right', 'temperature', 23.1, { minutes: 40 }),
+      reading('kids_room_tado_left', 'temperature', 21.5, { minutes: 40 }),
     ];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), {
       status: 'stale',
       sourceId: 'kids_room_tado_left',
       value: 21.5,
-      measuredAt: NOW - 40 * MINUTE,
+      measuredAt: NOW.subtract({ minutes: 40 }),
     });
   });
 
@@ -119,80 +122,80 @@ describe('precedence', () => {
     // The Home Coach leads for bedroom temperature. If it has said nothing at
     // all, a stale valve reading is still the best information in the flat, and
     // answering `missing` would throw away the one number there is.
-    const readings = [reading('bedroom_tado', 'temperature', 19.2, 40 * MINUTE)];
+    const readings = [reading('bedroom_tado', 'temperature', 19.2, { minutes: 40 })];
 
-    assert.deepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), {
       status: 'stale',
       sourceId: 'bedroom_tado',
       value: 19.2,
-      measuredAt: NOW - 40 * MINUTE,
+      measuredAt: NOW.subtract({ minutes: 40 }),
     });
   });
 
   it('resolves a room with exactly one source', () => {
-    const readings = [reading('living_room_tado', 'temperature', 20.4, 30 * SECOND)];
+    const readings = [reading('living_room_tado', 'temperature', 20.4, { seconds: 30 })];
 
-    assert.deepEqual(resolveSignal('living_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('living_room', 'temperature', readings, NOW), {
       status: 'fresh',
       sourceId: 'living_room_tado',
       value: 20.4,
-      measuredAt: NOW - 30 * SECOND,
+      measuredAt: NOW.subtract({ seconds: 30 }),
     });
   });
 
   it('reports missing when no source in the room measures the kind', () => {
     // Living-room CO2 has no instrument until a SEN66 is installed. Missing is
     // the honest answer, and it is not the same as a sensor that went quiet.
-    const readings = [reading('living_room_tado', 'temperature', 20.4, 30 * SECOND)];
+    const readings = [reading('living_room_tado', 'temperature', 20.4, { seconds: 30 })];
 
-    assert.deepEqual(resolveSignal('living_room', 'co2', readings, NOW), { status: 'missing' });
+    assertDeepEqual(resolveSignal('living_room', 'co2', readings, NOW), { status: 'missing' });
   });
 
   it('reports missing when the ranked sources have never reported', () => {
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', [], NOW), { status: 'missing' });
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', [], NOW), { status: 'missing' });
   });
 
   it('does not let one kind answer for another', () => {
     // The bedroom Netatmo reports CO2 and temperature. Asking for temperature
     // when only CO2 has arrived must not hand back a CO2 value in °C.
-    const readings = [reading('bedroom_netatmo', 'co2', 812, 30 * SECOND)];
+    const readings = [reading('bedroom_netatmo', 'co2', 812, { seconds: 30 })];
 
-    assert.deepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), { status: 'missing' });
+    assertDeepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), { status: 'missing' });
   });
 
   it('ignores a source that is not ranked for the room', () => {
-    const readings = [reading('bedroom_tado', 'temperature', 19.2, 30 * SECOND)];
+    const readings = [reading('bedroom_tado', 'temperature', 19.2, { seconds: 30 })];
 
-    assert.deepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), { status: 'missing' });
+    assertDeepEqual(resolveSignal('kids_room', 'temperature', readings, NOW), { status: 'missing' });
   });
 
   it('judges each source against its own freshness window', () => {
     // Eight minutes is dead for a Tado valve and healthy for a Netatmo. Had the
     // windows been global, this would have fallen through to a stale answer.
     const readings = [
-      reading('bedroom_netatmo', 'temperature', 18.9, 8 * MINUTE),
-      reading('bedroom_tado', 'temperature', 19.2, 8 * MINUTE),
+      reading('bedroom_netatmo', 'temperature', 18.9, { minutes: 8 }),
+      reading('bedroom_tado', 'temperature', 19.2, { minutes: 8 }),
     ];
 
-    assert.deepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('bedroom', 'temperature', readings, NOW), {
       status: 'fresh',
       sourceId: 'bedroom_netatmo',
       value: 18.9,
-      measuredAt: NOW - 8 * MINUTE,
+      measuredAt: NOW.subtract({ minutes: 8 }),
     });
   });
 
   it('takes the newest reading a source has produced', () => {
     const readings = [
-      reading('living_room_tado', 'temperature', 20.4, 60 * SECOND),
-      reading('living_room_tado', 'temperature', 20.9, 10 * SECOND),
+      reading('living_room_tado', 'temperature', 20.4, { seconds: 60 }),
+      reading('living_room_tado', 'temperature', 20.9, { seconds: 10 }),
     ];
 
-    assert.deepEqual(resolveSignal('living_room', 'temperature', readings, NOW), {
+    assertDeepEqual(resolveSignal('living_room', 'temperature', readings, NOW), {
       status: 'fresh',
       sourceId: 'living_room_tado',
       value: 20.9,
-      measuredAt: NOW - 10 * SECOND,
+      measuredAt: NOW.subtract({ seconds: 10 }),
     });
   });
 });

@@ -24,10 +24,9 @@ import type { ReadingStore } from '../src/store/readings.ts';
 // the same precedent the Modbus socket tests set. "No network" means nothing
 // beyond this machine; the vendor exchange goes through a scripted fetchImpl.
 
-const NOW = Date.UTC(2026, 7, 11, 12, 0);
-const MINUTE = 60_000;
+const NOW = Temporal.Instant.from('2026-08-11T12:00:00Z');
 
-function reading(sourceId: SensorId, kind: MeasurementKind, value: number, measuredAt: number): Reading {
+function reading(sourceId: SensorId, kind: MeasurementKind, value: number, measuredAt: Temporal.Instant): Reading {
   return { sourceId, kind, value, measuredAt, receivedAt: measuredAt };
 }
 
@@ -161,8 +160,8 @@ describe('the http server', () => {
     await withServer({}, async ({ baseUrl, store }) => {
       // The Netatmo leads for bedroom temperature but is stale; the Tado is
       // fresh and second — precedence has something real to decide.
-      const netatmo = reading('bedroom_netatmo', 'temperature', 23.1, NOW - 16 * MINUTE);
-      const tado = reading('bedroom_tado', 'temperature', 21.4, NOW - MINUTE);
+      const netatmo = reading('bedroom_netatmo', 'temperature', 23.1, NOW.subtract({ minutes: 16 }));
+      const tado = reading('bedroom_tado', 'temperature', 21.4, NOW.subtract({ minutes: 1 }));
       store.insert([netatmo, tado]);
 
       const expected = resolveSignal('bedroom', 'temperature', [netatmo, tado], NOW);
@@ -202,7 +201,7 @@ describe('the http server', () => {
 
   it('reports a stale value as stale, naming its source', async () => {
     await withServer({}, async ({ baseUrl, store }) => {
-      store.insert([reading('bedroom_netatmo', 'co2', 910, NOW - 20 * MINUTE)]);
+      store.insert([reading('bedroom_netatmo', 'co2', 910, NOW.subtract({ minutes: 20 }))]);
 
       const response = await fetch(`${baseUrl}/api/state`);
       const body: unknown = await response.json();
@@ -229,12 +228,12 @@ describe('the http server', () => {
 
   it('expands room history to every source config puts in the room', async () => {
     await withServer({}, async ({ baseUrl, store }) => {
-      const left = reading('kids_room_tado_left', 'temperature', 22.3, NOW - 2 * MINUTE);
-      const right = reading('kids_room_tado_right', 'temperature', 21.1, NOW - MINUTE);
-      const elsewhere = reading('bedroom_tado', 'temperature', 20.0, NOW - MINUTE);
+      const left = reading('kids_room_tado_left', 'temperature', 22.3, NOW.subtract({ minutes: 2 }));
+      const right = reading('kids_room_tado_right', 'temperature', 21.1, NOW.subtract({ minutes: 1 }));
+      const elsewhere = reading('bedroom_tado', 'temperature', 20.0, NOW.subtract({ minutes: 1 }));
       store.insert([left, right, elsewhere]);
 
-      const from = toIsoUtc(NOW - 10 * MINUTE);
+      const from = toIsoUtc(NOW.subtract({ minutes: 10 }));
       const response = await fetch(`${baseUrl}/api/rooms/kids_room/readings?from=${from}&to=${toIsoUtc(NOW)}`);
 
       assert.equal(response.status, 200);
@@ -250,8 +249,8 @@ describe('the http server', () => {
 
   it('serves per-instrument history', async () => {
     await withServer({}, async ({ baseUrl, store }) => {
-      const mine = reading('bedroom_netatmo', 'co2', 870, NOW - MINUTE);
-      const other = reading('bedroom_tado', 'temperature', 20.0, NOW - MINUTE);
+      const mine = reading('bedroom_netatmo', 'co2', 870, NOW.subtract({ minutes: 1 }));
+      const other = reading('bedroom_tado', 'temperature', 20.0, NOW.subtract({ minutes: 1 }));
       store.insert([mine, other]);
 
       const response = await fetch(`${baseUrl}/api/sensors/bedroom_netatmo/readings?kind=co2`);
@@ -260,7 +259,7 @@ describe('the http server', () => {
       assert.equal(response.status, 200);
       assert.deepEqual(body, {
         sensorId: 'bedroom_netatmo',
-        from: toIsoUtc(NOW - 24 * 60 * MINUTE),
+        from: toIsoUtc(NOW.subtract({ hours: 24 })),
         to: toIsoUtc(NOW),
         readings: [onTheWire(mine)],
       });
@@ -269,34 +268,34 @@ describe('the http server', () => {
 
   it('serves the log over the default last-day window, ISO in and out', async () => {
     await withServer({}, async ({ baseUrl, logs }) => {
-      logs.append(NOW - 25 * 60 * MINUTE, 'yesterday, outside the default window');
-      logs.append(NOW - MINUTE, '50% set over the API');
+      logs.append(NOW.subtract({ hours: 25 }), 'yesterday, outside the default window');
+      logs.append(NOW.subtract({ minutes: 1 }), '50% set over the API');
 
       const response = await fetch(`${baseUrl}/api/logs`);
 
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), {
-        from: toIsoUtc(NOW - 24 * 60 * MINUTE),
+        from: toIsoUtc(NOW.subtract({ hours: 24 })),
         to: toIsoUtc(NOW),
-        lines: [{ at: toIsoUtc(NOW - MINUTE), message: '50% set over the API' }],
+        lines: [{ at: toIsoUtc(NOW.subtract({ minutes: 1 })), message: '50% set over the API' }],
       });
     });
   });
 
   it('serves an explicit log range', async () => {
     await withServer({}, async ({ baseUrl, logs }) => {
-      logs.append(NOW - 3 * MINUTE, 'before the range');
-      logs.append(NOW - 2 * MINUTE, 'inside it');
+      logs.append(NOW.subtract({ minutes: 3 }), 'before the range');
+      logs.append(NOW.subtract({ minutes: 2 }), 'inside it');
 
-      const from = toIsoUtc(NOW - 2 * MINUTE);
-      const to = toIsoUtc(NOW - MINUTE);
+      const from = toIsoUtc(NOW.subtract({ minutes: 2 }));
+      const to = toIsoUtc(NOW.subtract({ minutes: 1 }));
       const response = await fetch(`${baseUrl}/api/logs?from=${from}&to=${to}`);
 
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), {
         from,
         to,
-        lines: [{ at: toIsoUtc(NOW - 2 * MINUTE), message: 'inside it' }],
+        lines: [{ at: toIsoUtc(NOW.subtract({ minutes: 2 })), message: 'inside it' }],
       });
     });
   });
@@ -308,7 +307,7 @@ describe('the http server', () => {
         ['/api/sensors/attic_sen66/readings', 404],
         ['/api/rooms/bedroom/readings?from=yesterday', 400],
         // Epoch milliseconds are the store's business, not the API's.
-        [`/api/rooms/bedroom/readings?from=${NOW - MINUTE}`, 400],
+        [`/api/rooms/bedroom/readings?from=${NOW.subtract({ minutes: 1 }).epochMilliseconds}`, 400],
         // No zone, so it would mean a different instant on every machine.
         ['/api/rooms/bedroom/readings?from=2026-08-11T12:00:00', 400],
         ['/api/rooms/bedroom/readings?to=2026-02-31T00:00:00Z', 400],
@@ -379,7 +378,7 @@ describe('the http server', () => {
   it('ingests a batch, stamping receivedAt from its own clock', async () => {
     await withServer({}, async ({ baseUrl }) => {
       const batch = JSON.stringify([
-        { sourceId: 'bedroom_netatmo', kind: 'co2', value: 842, measuredAt: toIsoUtc(NOW - MINUTE) },
+        { sourceId: 'bedroom_netatmo', kind: 'co2', value: 842, measuredAt: toIsoUtc(NOW.subtract({ minutes: 1 })) },
       ]);
       const response = await fetch(`${baseUrl}/api/readings`, {
         method: 'POST',
@@ -393,7 +392,7 @@ describe('the http server', () => {
       const readBack = await fetch(`${baseUrl}/api/sensors/bedroom_netatmo/readings?kind=co2`);
       assert.deepEqual(await readBack.json(), {
         sensorId: 'bedroom_netatmo',
-        from: toIsoUtc(NOW - 24 * 60 * MINUTE),
+        from: toIsoUtc(NOW.subtract({ hours: 24 })),
         to: toIsoUtc(NOW),
         // The node's clock says when it measured; ours says when it arrived.
         readings: [
@@ -401,7 +400,7 @@ describe('the http server', () => {
             sourceId: 'bedroom_netatmo',
             kind: 'co2',
             value: 842,
-            measuredAt: toIsoUtc(NOW - MINUTE),
+            measuredAt: toIsoUtc(NOW.subtract({ minutes: 1 })),
             receivedAt: toIsoUtc(NOW),
           },
         ],

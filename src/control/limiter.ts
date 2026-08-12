@@ -9,7 +9,7 @@ import type { CommandedLevel } from '../domain/level.ts';
  *
  * That rule is asymmetric on purpose. Increases apply immediately at any
  * distance, because up is the direction where the air is already bad. Decreases
- * move one step per `minDwellMinutes`, because a fast retreat is what lets CO2
+ * move one step per `minDwell`, because a fast retreat is what lets CO2
  * crash and rebound into the next boost — a square wave with a twenty-minute
  * period, which is the behaviour this project exists to eliminate.
  *
@@ -19,8 +19,8 @@ import type { CommandedLevel } from '../domain/level.ts';
 export function limit(
   decision: Decision,
   currentLevel: CommandedLevel,
-  lastChangeAt: number | undefined,
-  now: number,
+  lastChangeAt: Temporal.Instant | undefined,
+  now: Temporal.Instant,
 ): ControlOutcome {
   const cap = decision.sleeping ? CONTROL.sleepMaxLevel : MAX_COMMANDED_LEVEL;
 
@@ -76,12 +76,12 @@ export function limit(
   };
 }
 
-function dwellElapsed(lastChangeAt: number | undefined, now: number): boolean {
+function dwellElapsed(lastChangeAt: Temporal.Instant | undefined, now: Temporal.Instant): boolean {
   // Nothing has changed yet — a genuine first run, and also every restart, since
   // the timer lives in memory. Acting at once is right in both cases: the unit's
   // level is read at startup, so the first decision is as informed as any later
   // one, and a restart during bad air should respond rather than wait (Q4).
   if (lastChangeAt === undefined) return true;
 
-  return now - lastChangeAt >= CONTROL.minDwellMinutes * 60_000;
+  return Temporal.Instant.compare(now, lastChangeAt.add(CONTROL.minDwell)) >= 0;
 }

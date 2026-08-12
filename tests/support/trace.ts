@@ -36,8 +36,8 @@ export interface TracePoint {
 }
 
 export interface TraceOptions {
-  /** Epoch ms of minute zero. Written as UTC in the tests, with its local meaning spelled out. */
-  readonly startsAt: number;
+  /** Minute zero. Written as UTC in the tests, with its local meaning spelled out. */
+  readonly startsAt: Temporal.Instant;
   readonly minutes: number;
   readonly co2: readonly TracePoint[];
   /** Where the unit is found at startup. The loop adopts it on the first tick. */
@@ -73,11 +73,12 @@ export async function runTrace(options: TraceOptions): Promise<TraceStep[]> {
     });
 
   let loop = build();
-  const totalTicks = Math.floor((options.minutes * 60_000) / CONTROL.evaluationIntervalMs);
+  const evaluationMs = CONTROL.evaluationInterval.total('milliseconds');
+  const totalTicks = Math.floor((options.minutes * 60_000) / evaluationMs);
 
   for (let tick = 0; tick <= totalTicks; tick += 1) {
-    const now = options.startsAt + tick * CONTROL.evaluationIntervalMs;
-    const minute = (tick * CONTROL.evaluationIntervalMs) / 60_000;
+    const now = options.startsAt.add({ milliseconds: tick * evaluationMs });
+    const minute = (tick * evaluationMs) / 60_000;
 
     // A restart is a new loop against the same hardware and the same database:
     // it re-reads the unit and starts with no dwell timer and no sleep memory.
@@ -153,10 +154,12 @@ export function assertStepwiseDescent(steps: readonly TraceStep[]): void {
 function instrument(readings: readonly Reading[]): SensorSource {
   return {
     name: 'trace-instrument',
-    pollIntervalMs: 60_000,
+    pollInterval: Temporal.Duration.from({ minutes: 1 }),
 
-    async poll(now: number): Promise<readonly Reading[]> {
-      const reported = readings.filter((reading) => reading.measuredAt <= now);
+    async poll(now: Temporal.Instant): Promise<readonly Reading[]> {
+      const reported = readings.filter(
+        (reading) => Temporal.Instant.compare(reading.measuredAt, now) <= 0,
+      );
       const newest = reported.at(-1);
       return newest === undefined ? [] : [newest];
     },
@@ -171,7 +174,7 @@ function sampleReadings(options: TraceOptions): Reading[] {
   const readings: Reading[] = [];
 
   for (let minute = 0; minute <= lastMinute; minute += intervalMinutes) {
-    const measuredAt = options.startsAt + minute * 60_000;
+    const measuredAt = options.startsAt.add({ minutes: minute });
     readings.push({
       sourceId: 'bedroom_netatmo',
       kind: 'co2',

@@ -27,9 +27,9 @@ function options(port: number, overrides: Partial<ModbusUnitOptions> = {}): Modb
     host: '127.0.0.1',
     port,
     unitId: 1,
-    timeoutMs: BUDGET_MS,
+    timeout: Temporal.Duration.from({ milliseconds: BUDGET_MS }),
     retries: 0,
-    retryPauseMs: 0,
+    retryPause: Temporal.Duration.from({ milliseconds: 0 }),
     ...overrides,
   };
 }
@@ -92,9 +92,9 @@ describe('talking over a real socket', () => {
       host: '192.0.2.1',
       port: 502,
       unitId: 1,
-      timeoutMs: BUDGET_MS,
+      timeout: Temporal.Duration.from({ milliseconds: BUDGET_MS }),
       retries: 0,
-      retryPauseMs: 0,
+      retryPause: Temporal.Duration.from({ milliseconds: 0 }),
     });
 
     const startedAt = performance.now();

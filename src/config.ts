@@ -13,9 +13,6 @@ import type { MeasurementKind } from './domain/measurement.ts';
 //   2. Relocating a sensor means a NEW sensor id. Editing the room of an existing
 //      id would retroactively relabel every reading it ever produced.
 
-const SECOND_MS = 1_000;
-const MINUTE_MS = 60_000;
-
 export const ROOM_IDS = ['living_room', 'kids_room', 'bedroom'] as const;
 export type RoomId = (typeof ROOM_IDS)[number];
 
@@ -34,21 +31,21 @@ export interface SensorConfig {
   // Per-source, never global. This is load-bearing: one staleness window cannot
   // judge a 30-second-old Tado reading and a 6-minute-old Netatmo reading, and
   // getting it wrong in either direction is a safety bug.
-  readonly freshnessWindowMs: number;
+  readonly freshnessWindow: Temporal.Duration;
 }
 
 // Polled every 60 s; one missed poll is tolerated, two is not.
-const TADO_FRESHNESS_MS = 90 * SECOND_MS;
+const TADO_FRESHNESS = Temporal.Duration.from({ seconds: 90 });
 // Netatmo refreshes on their side every 7-8 minutes, so this has to cover two
 // of those before we call the instrument dead. Polling faster gains nothing.
-const NETATMO_FRESHNESS_MS = 15 * MINUTE_MS;
+const NETATMO_FRESHNESS = Temporal.Duration.from({ minutes: 15 });
 
 export const SENSORS = {
   living_room_tado: {
     room: 'living_room',
     kinds: ['temperature', 'humidity'],
     isActive: true,
-    freshnessWindowMs: TADO_FRESHNESS_MS,
+    freshnessWindow: TADO_FRESHNESS,
   },
   // Two radiators, two valves. They disagree by around a degree because they sit
   // at different ends of the room, and a mean would describe neither.
@@ -56,19 +53,19 @@ export const SENSORS = {
     room: 'kids_room',
     kinds: ['temperature', 'humidity'],
     isActive: true,
-    freshnessWindowMs: TADO_FRESHNESS_MS,
+    freshnessWindow: TADO_FRESHNESS,
   },
   kids_room_tado_right: {
     room: 'kids_room',
     kinds: ['temperature', 'humidity'],
     isActive: true,
-    freshnessWindowMs: TADO_FRESHNESS_MS,
+    freshnessWindow: TADO_FRESHNESS,
   },
   bedroom_tado: {
     room: 'bedroom',
     kinds: ['temperature', 'humidity'],
     isActive: true,
-    freshnessWindowMs: TADO_FRESHNESS_MS,
+    freshnessWindow: TADO_FRESHNESS,
   },
   // The only CO2 instrument in the flat today, which makes it the only thing
   // between the controller and the safe default.
@@ -76,7 +73,7 @@ export const SENSORS = {
     room: 'bedroom',
     kinds: ['temperature', 'humidity', 'co2'],
     isActive: true,
-    freshnessWindowMs: NETATMO_FRESHNESS_MS,
+    freshnessWindow: NETATMO_FRESHNESS,
   },
 } as const satisfies Record<string, SensorConfig>;
 
@@ -128,10 +125,10 @@ export interface ControlConfig {
   readonly timeZone: string;
   readonly sleepMaxLevel: CommandedLevel;
   readonly safeDefaultLevel: CommandedLevel;
-  readonly minDwellMinutes: number;
-  readonly evaluationIntervalMs: number;
+  readonly minDwell: Temporal.Duration;
+  readonly evaluationInterval: Temporal.Duration;
   readonly ceilingDiagnosticPpm: number;
-  readonly ceilingDiagnosticMinutes: number;
+  readonly ceilingDiagnosticWindow: Temporal.Duration;
 }
 
 // The band bottom and top are named here because the ceiling diagnostic is
@@ -175,12 +172,12 @@ export const CONTROL = {
   // One step down per this interval. It may never be shorter than the slowest
   // CO2 source's refresh (8 minutes for Netatmo), or the controller steps down
   // again before it could observe the last step.
-  minDwellMinutes: 10,
-  evaluationIntervalMs: 30 * SECOND_MS,
+  minDwell: Temporal.Duration.from({ minutes: 10 }),
+  evaluationInterval: Temporal.Duration.from({ seconds: 30 }),
 
   // ASHRAE Guideline 36's pinned-at-the-ceiling alarm: this far above the band
   // for this long, at full power, is a capacity problem and not something the
   // controller can fix by trying harder.
   ceilingDiagnosticPpm: BAND_HIGH_PPM * 1.1,
-  ceilingDiagnosticMinutes: 10,
+  ceilingDiagnosticWindow: Temporal.Duration.from({ minutes: 10 }),
 } as const satisfies ControlConfig;

@@ -10,24 +10,28 @@ import type { RoomSignal } from '../src/domain/signal.ts';
 
 // Europe/Prague is UTC+1 in January and UTC+2 in July, so every constant below
 // is written as UTC with its local meaning spelled out.
-const WINTER_MIDDAY = Date.UTC(2026, 0, 15, 11, 0); // 12:00 local
-const WINTER_AFTERNOON = Date.UTC(2026, 0, 15, 14, 0); // 15:00 local
-const WINTER_2159 = Date.UTC(2026, 0, 15, 20, 59); // 21:59 local
-const WINTER_2200 = Date.UTC(2026, 0, 15, 21, 0); // 22:00 local
-const WINTER_2330 = Date.UTC(2026, 0, 15, 22, 30); // 23:30 local
-const WINTER_0200 = Date.UTC(2026, 0, 15, 1, 0); // 02:00 local
-const WINTER_0659 = Date.UTC(2026, 0, 15, 5, 59); // 06:59 local
-const WINTER_0700 = Date.UTC(2026, 0, 15, 6, 0); // 07:00 local
-const WINTER_0705 = Date.UTC(2026, 0, 15, 6, 5); // 07:05 local
+const WINTER_MIDDAY = Temporal.Instant.from('2026-01-15T11:00:00Z'); // 12:00 local
+const WINTER_AFTERNOON = Temporal.Instant.from('2026-01-15T14:00:00Z'); // 15:00 local
+const WINTER_2159 = Temporal.Instant.from('2026-01-15T20:59:00Z'); // 21:59 local
+const WINTER_2200 = Temporal.Instant.from('2026-01-15T21:00:00Z'); // 22:00 local
+const WINTER_2330 = Temporal.Instant.from('2026-01-15T22:30:00Z'); // 23:30 local
+const WINTER_0200 = Temporal.Instant.from('2026-01-15T01:00:00Z'); // 02:00 local
+const WINTER_0659 = Temporal.Instant.from('2026-01-15T05:59:00Z'); // 06:59 local
+const WINTER_0700 = Temporal.Instant.from('2026-01-15T06:00:00Z'); // 07:00 local
+const WINTER_0705 = Temporal.Instant.from('2026-01-15T06:05:00Z'); // 07:05 local
 
 const MISSING: RoomSignal = { status: 'missing' };
 
+// The policy never reads a signal's measuredAt — freshness was already judged
+// upstream — so any instant will do here.
+const SOME_INSTANT = Temporal.Instant.from('2026-01-15T00:00:00Z');
+
 function fresh(sourceId: SensorId, value: number): RoomSignal {
-  return { status: 'fresh', sourceId, value, measuredAt: 0 };
+  return { status: 'fresh', sourceId, value, measuredAt: SOME_INSTANT };
 }
 
 function stale(sourceId: SensorId, value: number): RoomSignal {
-  return { status: 'stale', sourceId, value, measuredAt: 0 };
+  return { status: 'stale', sourceId, value, measuredAt: SOME_INSTANT };
 }
 
 interface SnapshotOptions {
@@ -288,8 +292,8 @@ describe('sleep', () => {
   it('reads the hour in the configured zone, not the host clock', () => {
     // The same instant in UTC, six months apart. 20:30 UTC is 21:30 in Prague
     // in January and 22:30 in July, and only one of those is quiet hours.
-    const januaryEvening = Date.UTC(2026, 0, 15, 20, 30);
-    const julyEvening = Date.UTC(2026, 6, 15, 20, 30);
+    const januaryEvening = Temporal.Instant.from('2026-01-15T20:30:00Z');
+    const julyEvening = Temporal.Instant.from('2026-07-15T20:30:00Z');
     const snapshot = snapshotOf({});
 
     assert.equal(decide(snapshot, januaryEvening).sleeping, false);

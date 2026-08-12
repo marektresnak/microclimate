@@ -5,15 +5,16 @@ import { describe, it } from 'node:test';
 import type { SensorId } from '../src/config.ts';
 import type { MeasurementKind, Reading } from '../src/domain/measurement.ts';
 import { RANGE_QUERY_SQL, SCHEMA, openReadingStore } from '../src/store/readings.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
-const NOW = Date.UTC(2026, 7, 10, 12, 0, 0);
-const MINUTE = 60_000;
+const NOW = Temporal.Instant.from('2026-08-10T12:00:00Z');
+const BEGINNING = Temporal.Instant.fromEpochMilliseconds(0);
 
 function reading(
   sourceId: SensorId,
   kind: MeasurementKind,
   value: number,
-  measuredAt: number,
+  measuredAt: Temporal.Instant,
   receivedAt = measuredAt,
 ): Reading {
   return { sourceId, kind, value, measuredAt, receivedAt };
@@ -24,15 +25,15 @@ describe('the readings store', () => {
     const store = openReadingStore(':memory:');
 
     const inserted = store.insert([
-      reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE),
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE),
-      reading('bedroom_netatmo', 'temperature', 18.9, NOW - MINUTE),
+      reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 })),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 })),
+      reading('bedroom_netatmo', 'temperature', 18.9, NOW.subtract({ minutes: 1 })),
     ]);
 
     assert.equal(inserted, 3);
-    assert.deepEqual(store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW), [
-      reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE),
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE),
+    assertDeepEqual(store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW), [
+      reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 })),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 })),
     ]);
 
     store.close();
@@ -44,24 +45,24 @@ describe('the readings store', () => {
     // spikes in a graph.
     const store = openReadingStore(':memory:');
     const batch = [
-      reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE),
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE),
+      reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 })),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 })),
     ];
 
     assert.equal(store.insert(batch), 2);
     assert.equal(store.insert(batch), 0);
-    assert.equal(store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW).length, 2);
+    assert.equal(store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW).length, 2);
 
     store.close();
   });
 
   it('stores only the new readings of a partial replay', () => {
     const store = openReadingStore(':memory:');
-    store.insert([reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE)]);
+    store.insert([reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 }))]);
 
     const inserted = store.insert([
-      reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE),
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE),
+      reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 })),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 })),
     ]);
 
     assert.equal(inserted, 1);
@@ -72,13 +73,13 @@ describe('the readings store', () => {
     // That is when the reading genuinely first arrived, and the retry is not
     // news. Overwriting it would quietly rewrite the arrival history.
     const store = openReadingStore(':memory:');
-    const measuredAt = NOW - 10 * MINUTE;
+    const measuredAt = NOW.subtract({ minutes: 10 });
 
-    store.insert([reading('bedroom_netatmo', 'co2', 812, measuredAt, NOW - 9 * MINUTE)]);
+    store.insert([reading('bedroom_netatmo', 'co2', 812, measuredAt, NOW.subtract({ minutes: 9 }))]);
     store.insert([reading('bedroom_netatmo', 'co2', 812, measuredAt, NOW)]);
 
-    const stored = store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW)[0];
-    assert.equal(stored?.receivedAt, NOW - 9 * MINUTE);
+    const stored = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW)[0];
+    assert.equal(stored?.receivedAt.epochMilliseconds, NOW.subtract({ minutes: 9 }).epochMilliseconds);
 
     store.close();
   });
@@ -89,8 +90,8 @@ describe('the readings store', () => {
     const store = openReadingStore(':memory:');
 
     store.insert([
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE, NOW - MINUTE),
-      reading('bedroom_netatmo', 'co2', 400, NOW - 60 * MINUTE, NOW),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 }), NOW.subtract({ minutes: 1 })),
+      reading('bedroom_netatmo', 'co2', 400, NOW.subtract({ minutes: 60 }), NOW),
     ]);
 
     assert.equal(store.latestReading('bedroom_netatmo', 'co2')?.value, 845);
@@ -103,11 +104,11 @@ describe('the readings store', () => {
     // overtook it, and a graph drawn from that is quietly wrong.
     const store = openReadingStore(':memory:');
     store.insert([
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE, NOW - MINUTE),
-      reading('bedroom_netatmo', 'co2', 400, NOW - 60 * MINUTE, NOW),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 }), NOW.subtract({ minutes: 1 })),
+      reading('bedroom_netatmo', 'co2', 400, NOW.subtract({ minutes: 60 }), NOW),
     ]);
 
-    const history = store.readingsInRange('bedroom_netatmo', 'co2', 0, NOW);
+    const history = store.readingsInRange('bedroom_netatmo', 'co2', BEGINNING, NOW);
 
     assert.deepEqual(
       history.map((stored) => stored.value),
@@ -136,11 +137,16 @@ describe('the readings store', () => {
     // crack between the windows nor counted in both.
     const store = openReadingStore(':memory:');
     store.insert([
-      reading('bedroom_netatmo', 'co2', 812, NOW - 2 * MINUTE),
-      reading('bedroom_netatmo', 'co2', 845, NOW - MINUTE),
+      reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 })),
+      reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 })),
     ]);
 
-    const window = store.readingsInRange('bedroom_netatmo', 'co2', NOW - 2 * MINUTE, NOW - MINUTE);
+    const window = store.readingsInRange(
+      'bedroom_netatmo',
+      'co2',
+      NOW.subtract({ minutes: 2 }),
+      NOW.subtract({ minutes: 1 }),
+    );
 
     assert.deepEqual(
       window.map((stored) => stored.value),
@@ -153,12 +159,14 @@ describe('the readings store', () => {
     const store = openReadingStore(':memory:');
 
     assert.equal(store.latestReading('living_room_tado', 'temperature'), undefined);
-    assert.deepEqual(store.readingsInRange('living_room_tado', 'temperature', 0, NOW), []);
+    assertDeepEqual(store.readingsInRange('living_room_tado', 'temperature', BEGINNING, NOW), []);
     store.close();
   });
 });
 
 describe('the schema', () => {
+  // These two speak raw SQL, below the store's Instant boundary, so epoch
+  // milliseconds appear here as the numbers the column actually holds.
   it('renders measured_at as readable ISO without storing it', () => {
     // The generated column costs zero storage — it is computed on read — and it
     // is what makes SELECT * legible without a join or a converter.
@@ -166,7 +174,7 @@ describe('the schema', () => {
     database.exec(SCHEMA);
     database
       .prepare('INSERT INTO readings (source_id, kind, value, measured_at, received_at) VALUES (?,?,?,?,?)')
-      .run('bedroom_netatmo', 'co2', 812, Date.UTC(2026, 7, 10, 13, 45, 30, 250), NOW);
+      .run('bedroom_netatmo', 'co2', 812, Date.UTC(2026, 7, 10, 13, 45, 30, 250), NOW.epochMilliseconds);
 
     const row = database.prepare('SELECT measured_at_iso FROM readings').get();
     const iso = row !== null && typeof row === 'object' && 'measured_at_iso' in row ? row.measured_at_iso : undefined;
@@ -183,7 +191,7 @@ describe('the schema', () => {
 
     const plan = database
       .prepare(`EXPLAIN QUERY PLAN ${RANGE_QUERY_SQL}`)
-      .all('bedroom_netatmo', 'co2', 0, NOW)
+      .all('bedroom_netatmo', 'co2', 0, NOW.epochMilliseconds)
       .map((row) => (row !== null && typeof row === 'object' && 'detail' in row ? row.detail : ''))
       .join('\n');
 

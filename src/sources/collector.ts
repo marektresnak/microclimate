@@ -20,19 +20,20 @@ export interface CollectorDependencies {
 }
 
 export interface Collector {
-  tick(now: number): Promise<void>;
+  tick(now: Temporal.Instant): Promise<void>;
 }
 
 export function createCollector(dependencies: CollectorDependencies): Collector {
   // When each source was last polled, so a five-minute source is not asked on
   // every thirty-second tick.
-  const lastPolledAt = new Map<string, number>();
+  const lastPolledAt = new Map<string, Temporal.Instant>();
 
   return {
     async tick(now) {
       for (const source of dependencies.sources) {
         const polledAt = lastPolledAt.get(source.name);
-        if (polledAt !== undefined && now - polledAt < source.pollIntervalMs) continue;
+        const dueAt = polledAt?.add(source.pollInterval);
+        if (dueAt !== undefined && Temporal.Instant.compare(now, dueAt) < 0) continue;
         lastPolledAt.set(source.name, now);
 
         // Per source: one vendor being unreachable must not stop the others

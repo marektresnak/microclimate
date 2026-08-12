@@ -1,52 +1,41 @@
 /**
- * The API speaks ISO 8601; the store speaks integer epoch milliseconds. These
- * two functions are the whole of the conversion, and they sit at the edge for
- * the same reason a unit conversion does.
+ * The API speaks ISO 8601; the domain carries `Temporal.Instant`; the store
+ * keeps integer epoch milliseconds. These two functions are the whole of the
+ * wire conversion, and they sit at the edge for the same reason a unit
+ * conversion does.
  *
  * The column stays an integer because `measured_at` is part of a uniqueness
- * constraint, and an integer has exactly one representation per instant. That
- * argument is about the *column*, not about the wire: two spellings of one
- * instant both parse to the same integer here, so dedup never sees the
- * difference and the API is free to be readable.
+ * constraint, and an integer has exactly one representation per instant. The
+ * parse enforces the same invariant on the way in: Temporal reads nanosecond
+ * precision, so the result is truncated to the millisecond — one instant, one
+ * representation, from the edge to the column, and no two in-memory instants
+ * the store would collapse into one row.
+ *
+ * The grammar is the platform's — `Temporal.Instant.from`, which is RFC 9557:
+ * an instant with an explicit zone. Everything the hand-rolled parser used to
+ * enforce still holds: a zone-less timestamp is refused (it would mean a
+ * different moment on every machine), a bare date is refused, and a date that
+ * does not exist (2026-02-31) is refused rather than rolled forward. What
+ * widens is spelling tolerance — a space or lowercase separator, a bracketed
+ * zone annotation, the compact form. All of them are unambiguous instants, so
+ * the one rule survives: name a moment explicitly or be refused.
  */
 
-// An ISO 8601 instant with an explicit zone. Seconds and their fraction are
-// optional; the zone is not.
-//
-// A zone-less string like `2026-08-12T09:36:00` is refused rather than guessed
-// at. `Date.parse` reads that form as the *host's* local time, so the same
-// request would mean a different instant on the server than on the laptop that
-// sent it, and would shift by an hour twice a year besides — the machine
-// dependence quiet hours already refuses. A range bound that is silently wrong
-// is worse than one that is rejected.
-const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
-
-/** How the API writes an instant: always UTC, always milliseconds. */
-export function toIsoUtc(epochMs: number): string {
-  return new Date(epochMs).toISOString();
+/** How the API writes an instant: always UTC, always milliseconds — byte for
+ * byte what the `measured_at_iso` generated column computes. */
+export function toIsoUtc(instant: Temporal.Instant): string {
+  return instant.toString({ fractionalSecondDigits: 3 });
 }
 
-/**
- * The instant an ISO 8601 string names, or undefined if it does not name one.
- * An explicit offset is accepted and normalised — `2026-08-12T11:36:00+02:00`
- * and `2026-08-12T09:36:00Z` are the same moment and yield the same number.
- */
-export function parseInstant(value: unknown): number | undefined {
+/** The instant an ISO 8601 string names — truncated to the millisecond the
+ * store thinks in — or undefined if it does not name one. */
+export function parseInstant(value: unknown): Temporal.Instant | undefined {
   if (typeof value !== 'string') return undefined;
 
-  const match = ISO_INSTANT.exec(value);
-  if (match === null) return undefined;
-
-  // Measured rather than assumed: `Date.parse` rejects month 13, hour 25 and
-  // minute 61, but silently rolls `2026-02-31` forward into March. Day of the
-  // month is the only field that does this, and rebuilding the date is what
-  // catches it — including the leap years a table of month lengths would have
-  // to get right on its own.
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  if (new Date(Date.UTC(year, month - 1, day)).getUTCDate() !== day) return undefined;
-
-  const epochMs = Date.parse(value);
-  return Number.isNaN(epochMs) ? undefined : epochMs;
+  try {
+    const parsed = Temporal.Instant.from(value);
+    return Temporal.Instant.fromEpochMilliseconds(parsed.epochMilliseconds);
+  } catch {
+    return undefined;
+  }
 }

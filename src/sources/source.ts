@@ -12,6 +12,6 @@ import type { Reading } from '../domain/measurement.ts';
  */
 export interface SensorSource {
   readonly name: string;
-  readonly pollIntervalMs: number;
-  poll(now: number): Promise<readonly Reading[]>;
+  readonly pollInterval: Temporal.Duration;
+  poll(now: Temporal.Instant): Promise<readonly Reading[]>;
 }

@@ -37,8 +37,8 @@ describe('the dwell floor', () => {
   it('is never shorter than the slowest CO2 source refreshes', () => {
     // Netatmo refreshes every 7-8 minutes on their side. Stepping down faster
     // than that means acting again before the last step could be observed.
-    const slowestCo2RefreshMinutes = 8;
-    assert.ok(CONTROL.minDwellMinutes >= slowestCo2RefreshMinutes);
+    const slowestCo2Refresh = Temporal.Duration.from({ minutes: 8 });
+    assert.ok(Temporal.Duration.compare(CONTROL.minDwell, slowestCo2Refresh) >= 0);
   });
 });
 
@@ -116,7 +116,9 @@ describe('topology', () => {
   it('gives Netatmo a window wide enough for two of its own refreshes', () => {
     // The per-source design in one assertion: Tado's window would call a
     // perfectly healthy Netatmo reading dead within two minutes.
-    assert.ok(SENSORS.bedroom_netatmo.freshnessWindowMs >= 15 * 60_000);
-    assert.ok(SENSORS.bedroom_tado.freshnessWindowMs < SENSORS.bedroom_netatmo.freshnessWindowMs);
+    assert.ok(Temporal.Duration.compare(SENSORS.bedroom_netatmo.freshnessWindow, { minutes: 15 }) >= 0);
+    assert.ok(
+      Temporal.Duration.compare(SENSORS.bedroom_tado.freshnessWindow, SENSORS.bedroom_netatmo.freshnessWindow) < 0,
+    );
   });
 });

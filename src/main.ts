@@ -1,3 +1,7 @@
+// First, before anything that touches Temporal at load time — config builds
+// Durations the moment it is imported.
+import './temporal-guard.ts';
+
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -10,6 +14,7 @@ import type { NetatmoAuthOptions } from './http/server.ts';
 import { createCollector } from './sources/collector.ts';
 import { createNetatmoSource } from './sources/netatmo.ts';
 import type { SensorSource } from './sources/source.ts';
+import { toIsoUtc } from './domain/time.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from './sources/synthetic.ts';
 import { openLogStore } from './store/logs.ts';
 import { openReadingStore } from './store/readings.ts';
@@ -26,15 +31,15 @@ import { openReadingStore } from './store/readings.ts';
 
 // The five seconds is the spike's, and covers connecting as well as answering.
 // One retry, because the collector comes back around in thirty seconds anyway.
-const MODBUS_TIMEOUT_MS = 5_000;
+const MODBUS_TIMEOUT = Temporal.Duration.from({ seconds: 5 });
 const MODBUS_RETRIES = 1;
 // What NModbus paused by default, so it is what the old spike was proven with.
-const MODBUS_RETRY_PAUSE_MS = 250;
+const MODBUS_RETRY_PAUSE = Temporal.Duration.from({ milliseconds: 250 });
 
 // How often sources are OFFERED a poll, not how often they are polled — each
 // carries its own cadence and mostly declines. Thirty seconds keeps a
 // one-minute source honest without busy-waiting.
-const COLLECT_TICK_MS = 30_000;
+const COLLECT_TICK = Temporal.Duration.from({ seconds: 30 });
 
 // Empty and unset behave the same everywhere: an empty string in .env is a
 // placeholder, not a value.
@@ -52,8 +57,8 @@ const logStore = openLogStore(databasePath);
 // disk full, file locked — the database cannot carry the news of its own
 // outage, and a logging failure must never take down the work it narrates.
 const log = (line: string): void => {
-  const at = Date.now();
-  console.log(`${new Date(at).toISOString()}  ${line}`);
+  const at = Temporal.Now.instant();
+  console.log(`${toIsoUtc(at)}  ${line}`);
   try {
     logStore.append(at, line);
   } catch {
@@ -75,9 +80,9 @@ function chooseUnit(): VentilationUnit {
     host,
     port: Number(process.env.HRV_MODBUS_PORT ?? 502),
     unitId: Number(process.env.HRV_MODBUS_UNIT_ID ?? 1),
-    timeoutMs: MODBUS_TIMEOUT_MS,
+    timeout: MODBUS_TIMEOUT,
     retries: MODBUS_RETRIES,
-    retryPauseMs: MODBUS_RETRY_PAUSE_MS,
+    retryPause: MODBUS_RETRY_PAUSE,
   });
 }
 
@@ -124,7 +129,7 @@ const server = createApiServer({
   logs: logStore,
   unit,
   netatmoAuth,
-  clock: Date.now,
+  clock: () => Temporal.Now.instant(),
   log,
 });
 server.listen(port);
@@ -138,6 +143,6 @@ console.log(
 // Sequential rather than an interval, so a slow tick delays the next one
 // instead of overlapping with it.
 for (;;) {
-  await collector.tick(Date.now());
-  await new Promise((resolve) => setTimeout(resolve, COLLECT_TICK_MS));
+  await collector.tick(Temporal.Now.instant());
+  await new Promise((resolve) => setTimeout(resolve, COLLECT_TICK.total('milliseconds')));
 }

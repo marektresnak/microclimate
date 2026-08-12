@@ -12,12 +12,12 @@ export type RoomSignal =
       readonly status: 'fresh';
       readonly sourceId: SensorId;
       readonly value: number;
-      readonly measuredAt: number;
+      readonly measuredAt: Temporal.Instant;
     }
   | {
       readonly status: 'stale';
       readonly sourceId: SensorId;
       readonly value: number;
-      readonly measuredAt: number;
+      readonly measuredAt: Temporal.Instant;
     }
   | { readonly status: 'missing' };

@@ -10,14 +10,13 @@ import type { SensorSource } from '../src/sources/source.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import type { ReadingStore } from '../src/store/readings.ts';
 
-const MIDDAY = Date.UTC(2026, 0, 15, 11, 0); // 12:00 in Prague
-const NIGHT = Date.UTC(2026, 0, 15, 1, 0); // 02:00 in Prague
-const MINUTE = 60_000;
+const MIDDAY = Temporal.Instant.from('2026-01-15T11:00:00Z'); // 12:00 in Prague
+const NIGHT = Temporal.Instant.from('2026-01-15T01:00:00Z'); // 02:00 in Prague
 
-function co2Source(name: string, value: number, measuredAt: number): SensorSource {
+function co2Source(name: string, value: number, measuredAt: Temporal.Instant): SensorSource {
   return {
     name,
-    pollIntervalMs: MINUTE,
+    pollInterval: Temporal.Duration.from({ minutes: 1 }),
     async poll() {
       return [{ sourceId: 'bedroom_netatmo', kind: 'co2', value, measuredAt, receivedAt: measuredAt }];
     },
@@ -40,8 +39,8 @@ function liveCo2Source(name: string, ppm: number): LiveSource {
     ppm,
     source: {
       name,
-      pollIntervalMs: MINUTE,
-      async poll(now: number): Promise<readonly Reading[]> {
+      pollInterval: Temporal.Duration.from({ minutes: 1 }),
+      async poll(now: Temporal.Instant): Promise<readonly Reading[]> {
         return [reading('bedroom_netatmo', 'co2', live.ppm, now)];
       },
     },
@@ -53,7 +52,7 @@ function liveCo2Source(name: string, ppm: number): LiveSource {
 function brokenSource(name: string): SensorSource {
   return {
     name,
-    pollIntervalMs: MINUTE,
+    pollInterval: Temporal.Duration.from({ minutes: 1 }),
     async poll() {
       throw new Error('vendor returned 500');
     },
@@ -194,7 +193,7 @@ describe('the control loop', () => {
     assert.deepEqual(unit.commands, []);
 
     unit.failWrites = false;
-    await loop.tick(MIDDAY + 30_000);
+    await loop.tick(MIDDAY.add({ seconds: 30 }));
     assert.deepEqual(unit.commands, [80]);
 
     assert.match(log.lines.join('\n'), /could not command 80%/);
@@ -257,7 +256,7 @@ describe('the control loop', () => {
 
     unit.level = 80; // the wall panel, at 02:00
     unit.failReads = true;
-    await loop.tick(NIGHT + 30_000);
+    await loop.tick(NIGHT.add({ seconds: 30 }));
 
     assert.equal(unit.level, 80, 'nothing can be corrected while the level is unknown');
     assert.deepEqual(unit.commands, [40]);
@@ -265,7 +264,7 @@ describe('the control loop', () => {
 
     // And the moment the unit answers again, the breach is found and corrected.
     unit.failReads = false;
-    await loop.tick(NIGHT + 60_000);
+    await loop.tick(NIGHT.add({ minutes: 1 }));
 
     assert.equal(unit.level, CONTROL.sleepMaxLevel);
     assert.deepEqual(unit.commands, [40, CONTROL.sleepMaxLevel]);
@@ -288,7 +287,7 @@ describe('the control loop', () => {
 
     await loop.tick(MIDDAY);
     unit.level = 80;
-    await loop.tick(MIDDAY + 30_000);
+    await loop.tick(MIDDAY.add({ seconds: 30 }));
 
     assert.match(log.lines.join('\n'), /the unit reports 80% and we are holding 20%/);
     assert.deepEqual(unit.commands, []);
@@ -312,7 +311,7 @@ describe('the control loop', () => {
 
     await loop.tick(NIGHT);
     unit.level = 100;
-    await loop.tick(NIGHT + 30_000);
+    await loop.tick(NIGHT.add({ seconds: 30 }));
 
     const state = loop.state();
     assert.ok(state !== undefined);
@@ -340,7 +339,7 @@ describe('the control loop', () => {
 
     await loop.tick(NIGHT);
     unit.level = 80; // somebody presses the wall panel at 02:00
-    await loop.tick(NIGHT + 30_000);
+    await loop.tick(NIGHT.add({ seconds: 30 }));
 
     assert.equal(unit.level, CONTROL.sleepMaxLevel);
     assert.deepEqual(unit.commands, [40, CONTROL.sleepMaxLevel]);
@@ -362,7 +361,7 @@ describe('the control loop', () => {
 
     await loop.tick(NIGHT);
     unit.level = 30;
-    await loop.tick(NIGHT + 30_000);
+    await loop.tick(NIGHT.add({ seconds: 30 }));
 
     assert.equal(unit.level, 30);
     assert.deepEqual(unit.commands, [40]);
@@ -382,7 +381,7 @@ describe('the control loop', () => {
     unit.failReads = true;
     await loop.tick(MIDDAY);
     unit.failReads = false;
-    await loop.tick(MIDDAY + 30_000);
+    await loop.tick(MIDDAY.add({ seconds: 30 }));
 
     assert.deepEqual(unit.commands, []);
     assert.match(log.lines.join('\n'), /the unit reports 60% and we are holding 40%/);
@@ -404,10 +403,10 @@ describe('the control loop', () => {
     });
 
     await loop.tick(MIDDAY);
-    await loop.tick(MIDDAY + 9 * MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 9 }));
     assert.equal(capacityReports(log), 0, 'reported before the ten minutes were up');
 
-    await loop.tick(MIDDAY + 10 * MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 10 }));
     assert.equal(capacityReports(log), 1);
     assert.match(log.lines.join('\n'), /pinned at 80% with 1400 ppm in the bedroom/);
 
@@ -426,7 +425,7 @@ describe('the control loop', () => {
     });
 
     for (let minute = 0; minute <= 30; minute += 0.5) {
-      await loop.tick(MIDDAY + minute * MINUTE);
+      await loop.tick(MIDDAY.add({ seconds: minute * 60 }));
     }
 
     assert.equal(capacityReports(log), 3);
@@ -445,20 +444,20 @@ describe('the control loop', () => {
     });
 
     await loop.tick(MIDDAY);
-    await loop.tick(MIDDAY + 10 * MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 10 }));
     assert.equal(capacityReports(log), 1);
 
     // Still demanding the ceiling, but back inside the margin, so the unit is no
     // longer out of capacity — it is merely working hard.
     live.ppm = 1300;
-    await loop.tick(MIDDAY + 11 * MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 11 }));
 
     live.ppm = 1400;
-    await loop.tick(MIDDAY + 12 * MINUTE);
-    await loop.tick(MIDDAY + 20 * MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 12 }));
+    await loop.tick(MIDDAY.add({ minutes: 20 }));
     assert.equal(capacityReports(log), 1, 'the ten minutes started again from the clearing');
 
-    await loop.tick(MIDDAY + 22 * MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 22 }));
     assert.equal(capacityReports(log), 2);
 
     store.close();
@@ -478,7 +477,7 @@ describe('the control loop', () => {
     });
 
     for (let minute = 0; minute <= 30; minute += 1) {
-      await loop.tick(MIDDAY + minute * MINUTE);
+      await loop.tick(MIDDAY.add({ seconds: minute * 60 }));
     }
 
     assert.equal(capacityReports(log), 0);
@@ -500,7 +499,7 @@ describe('the control loop', () => {
     });
 
     for (let minute = 0; minute <= 30; minute += 0.5) {
-      await loop.tick(NIGHT + minute * MINUTE);
+      await loop.tick(NIGHT.add({ seconds: minute * 60 }));
     }
 
     assert.equal(capacityReports(log), 0);
@@ -522,12 +521,12 @@ describe('the control loop', () => {
 
     live.ppm = 500;
     unit.failWrites = true;
-    await loop.tick(MIDDAY + MINUTE);
+    await loop.tick(MIDDAY.add({ minutes: 1 }));
 
     live.ppm = 1400;
     unit.failWrites = false;
     for (let minute = 2; minute <= 10; minute += 1) {
-      await loop.tick(MIDDAY + minute * MINUTE);
+      await loop.tick(MIDDAY.add({ seconds: minute * 60 }));
     }
 
     // The condition re-asserted at minute two, so the earliest honest alarm is
@@ -545,8 +544,8 @@ describe('the control loop', () => {
     const unit = createFakeUnit(20);
     const loop = createControlLoop({ sources: [live.source], store, unit, log: recorder().log });
 
-    await loop.tick(Date.UTC(2026, 0, 15, 5, 50)); // 06:50 Prague, inside quiet hours
-    await loop.tick(Date.UTC(2026, 0, 15, 6, 5)); // 07:05 Prague, and the room has not cleared
+    await loop.tick(Temporal.Instant.from('2026-01-15T05:50:00Z')); // 06:50 Prague, inside quiet hours
+    await loop.tick(Temporal.Instant.from('2026-01-15T06:05:00Z')); // 07:05 Prague, and the room has not cleared
 
     assert.deepEqual(unit.commands, [CONTROL.sleepMaxLevel]);
     store.close();
@@ -561,7 +560,7 @@ describe('the control loop', () => {
     const loop = createControlLoop({ sources: [live.source], store, unit, log: recorder().log });
 
     for (let minute = 0; minute <= 20; minute += 0.5) {
-      await loop.tick(MIDDAY + minute * MINUTE);
+      await loop.tick(MIDDAY.add({ seconds: minute * 60 }));
     }
 
     assert.deepEqual(unit.commands, [70, 60, 50]);
@@ -573,8 +572,8 @@ describe('the control loop', () => {
     let polls = 0;
     const counted: SensorSource = {
       name: 'netatmo',
-      pollIntervalMs: 8 * MINUTE,
-      async poll(now: number): Promise<readonly Reading[]> {
+      pollInterval: Temporal.Duration.from({ minutes: 8 }),
+      async poll(now: Temporal.Instant): Promise<readonly Reading[]> {
         polls += 1;
         return [reading('bedroom_netatmo', 'co2', 700, now)];
       },
@@ -588,7 +587,7 @@ describe('the control loop', () => {
     });
 
     for (let tick = 0; tick < 20; tick += 1) {
-      await loop.tick(MIDDAY + tick * 30_000);
+      await loop.tick(MIDDAY.add({ seconds: tick * 30 }));
     }
 
     // Twenty ticks is ten minutes: the first poll, and one more once the eight
@@ -598,7 +597,7 @@ describe('the control loop', () => {
   });
 });
 
-function reading(sourceId: SensorId, kind: MeasurementKind, value: number, measuredAt: number): Reading {
+function reading(sourceId: SensorId, kind: MeasurementKind, value: number, measuredAt: Temporal.Instant): Reading {
   return { sourceId, kind, value, measuredAt, receivedAt: measuredAt };
 }
 

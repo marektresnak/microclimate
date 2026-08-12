@@ -106,13 +106,22 @@ files ahead. I review each before the next starts.
 
 ## Runtime and dependencies
 
-**Node 24 or later** (developed on 26, installed via Homebrew). Chosen so that three things need
-no flags and no build step:
+**Node 26 or later, and it must be an official nodejs.org build** (developed on 26.7.0 via nvm;
+`.nvmrc` says so). Chosen so that four things need no flags and no build step:
 
 - `node:sqlite` is built in — no `better-sqlite3`, therefore no native compilation.
 - TypeScript type-stripping is native — no `tsc` build, no bundler. `tsc` is used only for
-  `--noEmit` typechecking.
+  `--noEmit` typechecking. TypeScript 6, bumped from 5.9 on 2026-08-12 because 6 is the first
+  line whose `lib` knows Temporal.
 - `node:test` + `node:assert/strict` — no vitest, no jest.
+- **`Temporal` is built in** (adopted 2026-08-12): every instant in the domain is a
+  `Temporal.Instant` and every tunable span a `Temporal.Duration`, so an instant, a duration and
+  a fan level are three different types rather than three numbers. This is what moved the floor
+  from 24 to 26 — and it is why the *build* matters, not only the version. Homebrew compiles its
+  node without Temporal (it conflicts with their shared ICU library), so `src/temporal-guard.ts`,
+  the first import in `main.ts`, refuses to start with a sentence naming the fix instead of dying
+  on a bare ReferenceError at the first instant touched. The tests need the same runtime; a
+  Temporal-less node fails them loudly but less politely.
 
 **`npm test` runs `tsc --noEmit` first, and that is not a convenience.** Type stripping deletes the
 types without ever checking them, so nothing at runtime enforces `CommandedLevel` — and
@@ -330,12 +339,17 @@ moment and different strings, and the constraint would not catch the duplicate. 
 representation. The `measured_at_iso` generated column costs zero storage — it is computed on
 read — and makes `SELECT *` human-readable, so nothing is given up for this.
 
-**That argument is about the column, and it does not reach the wire.** The API speaks ISO 8601 in
-both directions and **no epoch millisecond is visible anywhere in it** — the two spellings above
-both parse to the same integer at the edge, so the constraint never sees a difference and dedup is
-untouched by being readable. `domain/time.ts` is the whole conversion, two functions, sitting in
-the same place a unit conversion would. What the store keeps and what the API says are separate
-decisions, and this is the one place they are allowed to disagree.
+**That argument is about the column, and it does not reach the wire — or the domain.** The API
+speaks ISO 8601 in both directions and **no epoch millisecond is visible anywhere in it**; since
+2026-08-12 the code between the two edges carries `Temporal.Instant` for instants and
+`Temporal.Duration` for spans, so a timestamp, a window and a fan level are three types the
+compiler keeps apart rather than three numbers. `domain/time.ts` is still the whole wire
+conversion, two functions; the store modules hold the only `epochMilliseconds` conversions, at
+the SQL boundary. Temporal reads nanosecond precision, and `parseInstant` truncates to the
+millisecond on the way in — one instant, one representation, from the wire to the column, so the
+constraint never meets a sub-millisecond twin of a reading it already holds. What the store keeps
+and what the API says are separate decisions, and these are the two places they are allowed to
+disagree.
 
 **`measured_at` and `received_at` are never conflated.** Netatmo readings arrive minutes after
 they were taken, and a push node replaying a buffered backlog can deliver hours-old readings in
@@ -538,17 +552,23 @@ you have to go and paste somewhere to understand.
   `measured_at_iso` generated column computes. Reading the database by hand and reading the API
   give the same string.
 - **In: an ISO 8601 instant with an explicit zone**, `Z` or an offset. An offset is accepted and
-  normalised — two spellings of one moment become the same integer at the edge, so replay stays
+  normalised — two spellings of one moment become the same instant at the edge, so replay stays
   idempotent across them, and a node whose clock reads in local time is not made to convert.
+  The grammar is `Temporal.Instant.from`'s (RFC 9557) since 2026-08-12, which is wider in
+  spelling than the hand-rolled regex it replaced — a space or lowercase separator, a bracketed
+  zone annotation, the compact form all parse now, and sub-millisecond fractions truncate to the
+  millisecond the store thinks in. Every widened spelling is an unambiguous instant, so the one
+  rule survives unchanged: name a moment explicitly or be refused. The tests pin the widening as
+  a decision, not an accident.
 - **A zone-less timestamp is refused**, not guessed at. `Date.parse` reads `2026-08-12T09:36:00`
   as the *host's* local time, so the same request would mean different instants on the server and
   on the laptop that sent it, and would shift by an hour twice a year besides — the machine
   dependence quiet hours already refuses. A bare date is refused for the same reason a second
   grammar is: one rule, spelled out in the error.
-- **A date that does not exist is refused.** Measured rather than assumed: `Date.parse` rejects
-  month 13, hour 25 and minute 61 on its own, but silently rolls `2026-02-31` forward into March.
-  Day of the month is the only field that does that, and `domain/time.ts` rebuilds the date to
-  catch it.
+- **A date that does not exist is refused.** Temporal refuses `2026-02-31` outright. The first
+  build had to rebuild the date by hand because `Date.parse` silently rolls an impossible day
+  forward into March; that guard is deleted, and the tests keep pinning the rejections so a
+  retreat to `Date.parse` would fail loudly.
 - **Ranges are half-open: `from` is included, `to` is not** (2026-08-12, on every range endpoint).
   Half-open windows are the only kind that tile — a client walking `00:00–06:00, 06:00–12:00`
   sees a reading measured exactly at 06:00 once. The first build was inclusive on both ends,
@@ -607,9 +627,10 @@ src/
     level.ts            Level, CommandedLevel, narrowing, one step up/down
     signal.ts           RoomSignal — fresh | stale | missing
     decision.ts         Snapshot, Decision, ControlOutcome
-    time.ts             PURE. the ISO 8601 the API speaks <-> the epoch ms the
-                        store keeps. Two functions, and the only place the
-                        wire format and the column format meet.
+    time.ts             PURE. the ISO 8601 the API speaks <-> the
+                        Temporal.Instant the domain carries. Two functions;
+                        the store's epoch-ms columns convert inside store/,
+                        at the SQL boundary.
     precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
                         Shared by the controller and /api/state — one rule.
   sources/
@@ -648,6 +669,9 @@ src/
     fake.ts             test double, records calls
   http/
     server.ts           the read API, POST /api/unit/level, netatmo onboarding
+  temporal-guard.ts     refuses a runtime without Temporal, as main.ts's first
+                        import — Homebrew's node compiles it out. See "Runtime
+                        and dependencies".
   main.ts               wiring only
 tests/
 ```
@@ -756,7 +780,7 @@ Pipeline, in order:
 7. **Rate limit — asymmetric. Only decreases are limited.**
    - **Increases apply immediately, at any distance.** Demand at 80 from a current 20 commands 80
      on that cycle.
-   - **Decreases move one step per `minDwellMinutes` (10 min).** The slow retreat is what stops
+   - **Decreases move one step per `minDwell` (10 min).** The slow retreat is what stops
      CO₂ crashing and rebounding into the next boost, and it is the damper that keeps a
      mis-sized band degrading into slow drift rather than a square wave.
    - The sleep cap in step 6 is **not** a decrease for this purpose. It is immediate and unlimited.
@@ -983,7 +1007,14 @@ points. Build it then, with the band recomputation it enables. See `docs/test-pl
 
 - **The pure core is tested directly** — `policy.ts` and `limiter.ts` take a snapshot and a
   timestamp and return a decision. Table-driven cases.
-- **Time is injected**, never read from `Date.now()` inside logic. A `Clock` is a parameter.
+- **Time is injected**, never read from a clock inside logic. `now` arrives as a
+  `Temporal.Instant` parameter; only `main.ts` calls `Temporal.Now.instant()`.
+- **Instants and `deepEqual` do not mix.** A `Temporal.Instant` keeps its state in internal
+  slots, which `assert.deepEqual` cannot see — two *different* instants compare as deeply equal,
+  so a wrong timestamp passes silently. Every deep assertion on an instant-bearing shape goes
+  through `tests/support/deep-equal.ts`, which writes the instants out as ISO strings first, or
+  compares `epochMilliseconds` directly. A bare `assert.deepEqual` on anything carrying an
+  instant is a bug, and it is the one way this suite can go green while checking nothing.
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings.
 - **The cases that matter** are the failure ones: sensor goes stale mid-run, Netatmo unreachable,
@@ -999,7 +1030,11 @@ A reviewer should be able to read the policy tests alone and understand what the
 `config.ts` is the sole source of truth for both **topology** (rooms; sensors with their room,
 kinds, `isActive` flag and freshness window; per-`(room, kind)` precedence order) and **tuning**
 (thresholds, quiet hours, dwell). All `as const`, so ids are literal union types and a typo is a
-compile error.
+compile error. Every time span in it — freshness windows, the dwell, the evaluation interval —
+is a `Temporal.Duration` (2026-08-12), so the unit travels with the type instead of living in an
+`Ms` suffix, and a window cannot be handed where a threshold was meant. Spans become numbers
+again only at the platform's door — `setTimeout`, `AbortSignal.timeout` — one `total()` call at
+the top of the module that owns the timer.
 
 Secrets — Tado and Netatmo OAuth, the Modbus host, the ingest token — come from environment
 variables and are never committed. One secret cannot live there:
@@ -1038,7 +1073,7 @@ Starting defaults, all to be tuned against reality:
 | Quiet hours, and the zone they are read in | 22:00–07:00, `Europe/Prague` | tune |
 | Sleep max level | 50 | tune |
 | Safe default level (no data) | 40 | tune |
-| `minDwellMinutes` — one step down | 10 minutes | tune, floor ≥ 8 min |
+| `minDwell` — one step down | 10 minutes | tune, floor ≥ 8 min |
 | Control evaluation interval | 30 s | tune |
 | `MIN_LEVEL` | 20 | **physical** |
 | `MAX_COMMANDED_LEVEL` | 80 | **physical** |

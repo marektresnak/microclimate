@@ -56,7 +56,7 @@ export interface ControlLoopDependencies {
  * can be read off rather than inferred.
  */
 export interface LoopState {
-  readonly decidedAt: number;
+  readonly decidedAt: Temporal.Instant;
   readonly level: CommandedLevel; // where we believe the fan is
   readonly actualLevel: Level | undefined; // where it says it is; undefined if unreadable
   readonly desiredLevel: CommandedLevel; // what the air asked for, before any cap
@@ -65,7 +65,7 @@ export interface LoopState {
 }
 
 export interface ControlLoop {
-  tick(now: number): Promise<void>;
+  tick(now: Temporal.Instant): Promise<void>;
   /** Undefined until the first tick has run. */
   state(): LoopState | undefined;
 }
@@ -90,29 +90,30 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
   // variable exists for one named reason:
 
   // when each source was last polled, so a 15-minute source is not asked every 30s
-  const lastPolledAt = new Map<string, number>();
+  const lastPolledAt = new Map<string, Temporal.Instant>();
 
   // where we believe the fan is. `undefined` = we have not started yet, which is
   // what triggers the read-and-adopt on the very first tick
   let currentLevel: CommandedLevel | undefined;
   // when the level last actually changed — the clock the descent rate limit uses
-  let lastChangeAt: number | undefined;
+  let lastChangeAt: Temporal.Instant | undefined;
   // was the previous cycle asleep? the CO2 sleep term can only EXTEND a sleep
   // that quiet hours already asserted, so it needs to know
   let wasSleeping = false;
   // when the fan first went out of capacity, for the ten-minute alarm
-  let pinnedSince: number | undefined;
+  let pinnedSince: Temporal.Instant | undefined;
   // the last decision, handed out by state() for /api/state
   let lastState: LoopState | undefined;
 
-  async function tick(now: number): Promise<void> {
+  async function tick(now: Temporal.Instant): Promise<void> {
     // ── 1. POLL ──────────────────────────────────────────────────────────────
     for (const source of dependencies.sources) {
       // TEACHING: each source has its own cadence. Netatmo only refreshes every
       // 7-8 minutes on their side, so polling it every 30 seconds gains nothing
       // and just burns API quota.
       const polledAt = lastPolledAt.get(source.name);
-      if (polledAt !== undefined && now - polledAt < source.pollIntervalMs) continue;
+      const dueAt = polledAt?.add(source.pollInterval);
+      if (dueAt !== undefined && Temporal.Instant.compare(now, dueAt) < 0) continue;
       lastPolledAt.set(source.name, now);
 
       // Per source: one vendor being unreachable must not stop the others being
@@ -320,7 +321,7 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
   // TEACHING: this is the only state in the loop that is not the control
   // decision itself. It answers "have we been flat out and still losing, for long
   // enough that it is not a blip?"
-  function reportCapacity(snapshot: Snapshot, level: CommandedLevel, now: number): void {
+  function reportCapacity(snapshot: Snapshot, level: CommandedLevel, now: Temporal.Instant): void {
     const worst = worstFreshCo2(snapshot.co2ByRoom);
     // TEACHING: BOTH halves matter. At the ceiling with merely-bad air is the
     // design working. Bad air while the sleep cap holds the fan at 50 is not a
@@ -341,14 +342,14 @@ export function createControlLoop(dependencies: ControlLoopDependencies): Contro
     // TEACHING: `??=` assigns only if currently undefined — so this records when
     // the episode STARTED and leaves it alone on every tick after.
     pinnedSince ??= now;
-    if (now - pinnedSince < CONTROL.ceilingDiagnosticMinutes * 60_000) return;
+    if (Temporal.Instant.compare(now, pinnedSince.add(CONTROL.ceilingDiagnosticWindow)) < 0) return;
 
     // Re-armed rather than latched: while the condition lasts this repeats once
     // per window, which is what an ongoing capacity problem deserves.
     pinnedSince = now;
     dependencies.log(
       `pinned at ${MAX_COMMANDED_LEVEL}% with ${Math.round(worst.value)} ppm in the ${worst.room} ` +
-        `for ${CONTROL.ceilingDiagnosticMinutes} minutes — a capacity problem, not a control one`,
+        `for ${CONTROL.ceilingDiagnosticWindow.minutes} minutes — a capacity problem, not a control one`,
     );
   }
 

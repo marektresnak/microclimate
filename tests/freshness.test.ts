@@ -4,32 +4,32 @@ import { describe, it } from 'node:test';
 import { SENSORS } from '../src/config.ts';
 import { toRoomSignal } from '../src/control/freshness.ts';
 import type { Reading } from '../src/domain/measurement.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
-const NOW = Date.UTC(2026, 7, 10, 12, 0, 0);
-const SECOND = 1_000;
-const MINUTE = 60_000;
-const WINDOW = 90 * SECOND;
+const NOW = Temporal.Instant.from('2026-08-10T12:00:00Z');
+const WINDOW = Temporal.Duration.from({ seconds: 90 });
 
-function co2ReadingAt(measuredAt: number, receivedAt = measuredAt): Reading {
+function co2ReadingAt(measuredAt: Temporal.Instant, receivedAt = measuredAt): Reading {
   return { sourceId: 'bedroom_netatmo', kind: 'co2', value: 812, measuredAt, receivedAt };
 }
 
 describe('freshness', () => {
   it('calls a reading inside the window fresh', () => {
-    const signal = toRoomSignal(co2ReadingAt(NOW - 30 * SECOND), NOW, WINDOW);
+    const signal = toRoomSignal(co2ReadingAt(NOW.subtract({ seconds: 30 })), NOW, WINDOW);
 
     assert.equal(signal.status, 'fresh');
   });
 
   it('calls a reading exactly at the window boundary fresh', () => {
     // Inclusive. Pinned either way, but pinned.
-    const signal = toRoomSignal(co2ReadingAt(NOW - WINDOW), NOW, WINDOW);
+    const signal = toRoomSignal(co2ReadingAt(NOW.subtract(WINDOW)), NOW, WINDOW);
 
     assert.equal(signal.status, 'fresh');
   });
 
   it('calls a reading one millisecond past the window stale', () => {
-    const signal = toRoomSignal(co2ReadingAt(NOW - WINDOW - 1), NOW, WINDOW);
+    const oneMsPast = NOW.subtract(WINDOW).subtract({ milliseconds: 1 });
+    const signal = toRoomSignal(co2ReadingAt(oneMsPast), NOW, WINDOW);
 
     assert.equal(signal.status, 'stale');
   });
@@ -37,10 +37,10 @@ describe('freshness', () => {
   it('carries the last value and its timestamp through staleness', () => {
     // A stale reading is excluded from demand, but a dashboard showing
     // "1100 ppm, 40 minutes ago" is telling you something a blank cannot.
-    const measuredAt = NOW - 40 * MINUTE;
+    const measuredAt = NOW.subtract({ minutes: 40 });
     const signal = toRoomSignal(co2ReadingAt(measuredAt), NOW, WINDOW);
 
-    assert.deepEqual(signal, {
+    assertDeepEqual(signal, {
       status: 'stale',
       sourceId: 'bedroom_netatmo',
       value: 812,
@@ -53,7 +53,7 @@ describe('freshness', () => {
     // said so, and the answer should already be in the response.
     const signal = toRoomSignal(co2ReadingAt(NOW), NOW, WINDOW);
 
-    assert.deepEqual(signal, {
+    assertDeepEqual(signal, {
       status: 'fresh',
       sourceId: 'bedroom_netatmo',
       value: 812,
@@ -63,16 +63,16 @@ describe('freshness', () => {
 
   it('distinguishes never heard from from went quiet', () => {
     const neverHeardFrom = toRoomSignal(undefined, NOW, WINDOW);
-    const wentQuiet = toRoomSignal(co2ReadingAt(NOW - 2 * WINDOW), NOW, WINDOW);
+    const wentQuiet = toRoomSignal(co2ReadingAt(NOW.subtract({ seconds: 180 })), NOW, WINDOW);
 
-    assert.deepEqual(neverHeardFrom, { status: 'missing' });
+    assertDeepEqual(neverHeardFrom, { status: 'missing' });
     assert.equal(wentQuiet.status, 'stale');
   });
 
   it('tolerates a reading from the near future', () => {
     // Small clock skew between us and the instrument. Taking a healthy sensor
     // offline over two seconds of drift would be the worse failure.
-    const signal = toRoomSignal(co2ReadingAt(NOW + 2 * SECOND), NOW, WINDOW);
+    const signal = toRoomSignal(co2ReadingAt(NOW.add({ seconds: 2 })), NOW, WINDOW);
 
     assert.equal(signal.status, 'fresh');
   });
@@ -81,7 +81,7 @@ describe('freshness', () => {
     // Netatmo hands us readings minutes after it took them, and a push node
     // replaying a backlog hands us hours-old ones. Judging on arrival time
     // would make a twelve-hour-old reading look brand new.
-    const measuredAnHourAgo = co2ReadingAt(NOW - 60 * MINUTE, NOW);
+    const measuredAnHourAgo = co2ReadingAt(NOW.subtract({ minutes: 60 }), NOW);
 
     assert.equal(toRoomSignal(measuredAnHourAgo, NOW, WINDOW).status, 'stale');
   });
@@ -89,14 +89,14 @@ describe('freshness', () => {
   it('gives the same reading two different verdicts under two windows', () => {
     // The whole per-source design in one assertion. Eight minutes old is a
     // perfectly healthy Netatmo reading and a long-dead Tado one.
-    const eightMinutesOld = co2ReadingAt(NOW - 8 * MINUTE);
+    const eightMinutesOld = co2ReadingAt(NOW.subtract({ minutes: 8 }));
 
     assert.equal(
-      toRoomSignal(eightMinutesOld, NOW, SENSORS.bedroom_netatmo.freshnessWindowMs).status,
+      toRoomSignal(eightMinutesOld, NOW, SENSORS.bedroom_netatmo.freshnessWindow).status,
       'fresh',
     );
     assert.equal(
-      toRoomSignal(eightMinutesOld, NOW, SENSORS.bedroom_tado.freshnessWindowMs).status,
+      toRoomSignal(eightMinutesOld, NOW, SENSORS.bedroom_tado.freshnessWindow).status,
       'stale',
     );
   });

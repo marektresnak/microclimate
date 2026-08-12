@@ -49,19 +49,20 @@ const HUMIDITY_THROUGH_THE_DAY: readonly DailyPoint[] = [
   { hour: 24, value: 52 },
 ];
 
-const NETATMO_REFRESH_MS = 8 * 60_000;
-const TADO_REFRESH_MS = 60_000;
+const NETATMO_REFRESH = Temporal.Duration.from({ minutes: 8 });
+const TADO_REFRESH = Temporal.Duration.from({ minutes: 1 });
+const POLL_INTERVAL = Temporal.Duration.from({ minutes: 1 });
 
 export function createSyntheticNetatmo(): SensorSource {
   return {
     name: 'synthetic-netatmo',
-    pollIntervalMs: 60_000,
+    pollInterval: POLL_INTERVAL,
 
     async poll(now) {
       // Netatmo refreshes on their side every 7-8 minutes, so polling faster
       // hands back the same reading with the same timestamp — and the store's
       // uniqueness constraint absorbs it for free. Worth being able to watch.
-      const measuredAt = Math.floor(now / NETATMO_REFRESH_MS) * NETATMO_REFRESH_MS;
+      const measuredAt = flooredTo(now, NETATMO_REFRESH);
       const hour = localHourOfDay(measuredAt);
       const drift = wobbleAt(measuredAt);
 
@@ -86,10 +87,10 @@ const VALVES: readonly { readonly id: SensorId; readonly temperatureOffset: numb
 export function createSyntheticTado(): SensorSource {
   return {
     name: 'synthetic-tado',
-    pollIntervalMs: 60_000,
+    pollInterval: POLL_INTERVAL,
 
     async poll(now) {
-      const measuredAt = Math.floor(now / TADO_REFRESH_MS) * TADO_REFRESH_MS;
+      const measuredAt = flooredTo(now, TADO_REFRESH);
       const hour = localHourOfDay(measuredAt);
       const drift = wobbleAt(measuredAt);
       const readings: Reading[] = [];
@@ -109,16 +110,24 @@ function reading(
   sourceId: SensorId,
   kind: MeasurementKind,
   value: number,
-  measuredAt: number,
-  receivedAt: number,
+  measuredAt: Temporal.Instant,
+  receivedAt: Temporal.Instant,
 ): Reading {
   return { sourceId, kind, value: Math.round(value * 10) / 10, measuredAt, receivedAt };
 }
 
+// Quantised onto the vendor's refresh grid. Temporal's own round() cannot do
+// this one: it requires the increment to divide its unit evenly, and eight
+// minutes does not divide an hour.
+function flooredTo(now: Temporal.Instant, refresh: Temporal.Duration): Temporal.Instant {
+  const refreshMs = refresh.total('milliseconds');
+  return Temporal.Instant.fromEpochMilliseconds(Math.floor(now.epochMilliseconds / refreshMs) * refreshMs);
+}
+
 // Deterministic, so two runs of the demo tell the same story and a poll repeated
 // inside one refresh window is byte-for-byte identical.
-function wobbleAt(measuredAt: number): number {
-  return Math.sin(measuredAt / 720_000);
+function wobbleAt(measuredAt: Temporal.Instant): number {
+  return Math.sin(measuredAt.epochMilliseconds / 720_000);
 }
 
 function valueAt(points: readonly DailyPoint[], hour: number): number {

@@ -26,7 +26,7 @@ import type { ReadingStore } from '../store/readings.ts';
 // The past is deliberately unbounded (F6) — a replayed backlog is exactly the
 // data batching exists to carry, and INSERT OR IGNORE already makes replay
 // idempotent at any age.
-const FUTURE_SKEW_MS = 5 * 60_000;
+const FUTURE_SKEW = Temporal.Duration.from({ minutes: 5 });
 
 // NDIR CO2 sensors self-calibrate by assuming they periodically see outdoor
 // air (~420 ppm). A reading below what outdoor air can be means that
@@ -51,7 +51,7 @@ export interface IngestOutcome {
 export function ingestBatch(
   body: unknown,
   store: ReadingStore,
-  now: number,
+  now: Temporal.Instant,
   log: (line: string) => void,
 ): IngestOutcome | { error: string } {
   if (!Array.isArray(body)) {
@@ -89,7 +89,7 @@ export function ingestBatch(
 /** The reading, or the reason the candidate is not one. Every check runs
  * before SQLite sees the value — the STRICT table throwing would fail the
  * whole batch, and its error would name a column, not a reading. */
-function toReading(candidate: unknown, now: number): Reading | string {
+function toReading(candidate: unknown, now: Temporal.Instant): Reading | string {
   if (candidate === null || typeof candidate !== 'object') {
     return 'not an object';
   }
@@ -136,11 +136,11 @@ function toReading(candidate: unknown, now: number): Reading | string {
   if (measuredAt === undefined) {
     return 'measuredAt must be an ISO 8601 timestamp with a zone, e.g. 2026-08-12T09:36:00Z';
   }
-  if (measuredAt > now + FUTURE_SKEW_MS) {
+  if (Temporal.Instant.compare(measuredAt, now.add(FUTURE_SKEW)) > 0) {
     // Reported back as the instant the node claimed, not as a difference in
     // milliseconds: the node has to find the fault in its own clock, and its
     // clock reads in dates.
-    return `measuredAt ${toIsoUtc(measuredAt)} is more than ${FUTURE_SKEW_MS / 60_000} minutes ahead of this server`;
+    return `measuredAt ${toIsoUtc(measuredAt)} is more than ${FUTURE_SKEW.minutes} minutes ahead of this server`;
   }
 
   return {

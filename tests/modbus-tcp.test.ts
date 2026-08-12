@@ -15,9 +15,9 @@ const OPTIONS: ModbusUnitOptions = {
   host: 'unit.invalid',
   port: 502,
   unitId: 1,
-  timeoutMs: 100,
+  timeout: Temporal.Duration.from({ milliseconds: 100 }),
   retries: 0,
-  retryPauseMs: 0,
+  retryPause: Temporal.Duration.from({ milliseconds: 0 }),
 };
 
 interface FakeTransport {
@@ -228,7 +228,10 @@ describe('connections', () => {
       return { send: () => undefined, listen: () => undefined, close: () => undefined };
     };
 
-    const unit = createModbusUnit({ ...OPTIONS, timeoutMs: 300, retries: 0 }, slowToOpen);
+    const unit = createModbusUnit(
+      { ...OPTIONS, timeout: Temporal.Duration.from({ milliseconds: 300 }), retries: 0 },
+      slowToOpen,
+    );
 
     const startedAt = performance.now();
     await assert.rejects(unit.read());
@@ -244,7 +247,10 @@ describe('connections', () => {
       return { send: () => undefined, listen: () => undefined, close: () => undefined };
     };
 
-    const unit = createModbusUnit({ ...OPTIONS, timeoutMs: 30, retries: 0 }, slowerThanTheBudget);
+    const unit = createModbusUnit(
+      { ...OPTIONS, timeout: Temporal.Duration.from({ milliseconds: 30 }), retries: 0 },
+      slowerThanTheBudget,
+    );
 
     await assert.rejects(unit.read(), /used the whole 30 ms/);
   });

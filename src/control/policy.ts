@@ -11,7 +11,7 @@ import type { RoomSignal } from '../domain/signal.ts';
  * parameter, nothing here reads a clock or touches the database, and the sleep
  * cap is deliberately *not* applied — that belongs to the limiter, in one place.
  */
-export function decide(snapshot: Snapshot, now: number): Decision {
+export function decide(snapshot: Snapshot, now: Temporal.Instant): Decision {
   const reasons: string[] = [];
   const sleeping = decideSleep(snapshot, now, reasons);
 
@@ -86,7 +86,7 @@ function withHysteresis(co2Ppm: number, current: CommandedLevel): CommandedLevel
  * is what makes CO2 readable as "still asleep" at all. If the room's use ever
  * changes, delete the clause.
  */
-function decideSleep(snapshot: Snapshot, now: number, reasons: string[]): boolean {
+function decideSleep(snapshot: Snapshot, now: Temporal.Instant, reasons: string[]): boolean {
   if (inQuietHours(now)) {
     reasons.push(
       `quiet hours ${CONTROL.quietHoursStartHour}:00-${CONTROL.quietHoursEndHour}:00 ${CONTROL.timeZone}`,
@@ -109,7 +109,7 @@ function decideSleep(snapshot: Snapshot, now: number, reasons: string[]): boolea
 
 // 22:00-07:00 wraps midnight, so this is `||`. Written with `&&` it is always
 // false and the night cap silently never fires.
-function inQuietHours(now: number): boolean {
+function inQuietHours(now: Temporal.Instant): boolean {
   const hour = localHourOfDay(now);
   return hour >= CONTROL.quietHoursStartHour || hour < CONTROL.quietHoursEndHour;
 }

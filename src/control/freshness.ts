@@ -9,20 +9,21 @@ import type { RoomSignal } from '../domain/signal.ts';
  */
 export function toRoomSignal(
   reading: Reading | undefined,
-  now: number,
-  windowMs: number,
+  now: Temporal.Instant,
+  window: Temporal.Duration,
 ): RoomSignal {
   if (reading === undefined) return { status: 'missing' };
 
   // On measuredAt, never receivedAt. A reading that arrived one second ago but
   // was taken an hour ago is an hour old, and treating it as fresh is how a
   // replayed backlog would drive the fan.
-  const age = now - reading.measuredAt;
+  const staleAfter = reading.measuredAt.add(window);
 
-  // A negative age is a reading from the near future: clock skew between us and
-  // the instrument. Fresh is the right answer — taking a healthy sensor offline
-  // over a couple of seconds of drift is the worse failure.
-  const status = age <= windowMs ? 'fresh' : 'stale';
+  // A reading from the near future — clock skew between us and the instrument —
+  // sits before staleAfter as well, so it reads fresh. That is the right answer:
+  // taking a healthy sensor offline over a couple of seconds of drift is the
+  // worse failure.
+  const status = Temporal.Instant.compare(now, staleAfter) <= 0 ? 'fresh' : 'stale';
 
   return {
     status,

@@ -57,11 +57,12 @@ export interface ReadingStore {
   /** Returns how many rows were new, so a caller can see replay being absorbed. */
   insert(readings: readonly Reading[]): number;
   latestReading(sourceId: SensorId, kind: MeasurementKind): Reading | undefined;
+  /** Half-open [from, to): adjacent windows tile. */
   readingsInRange(
     sourceId: SensorId,
     kind: MeasurementKind,
-    fromMeasuredAt: number,
-    toMeasuredAt: number,
+    fromMeasuredAt: Temporal.Instant,
+    toMeasuredAt: Temporal.Instant,
   ): Reading[];
   close(): void;
 }
@@ -85,12 +86,14 @@ export function openReadingStore(path: string): ReadingStore {
       database.exec('BEGIN');
       try {
         for (const reading of readings) {
+          // The one place an instant becomes a column value. Millisecond epoch,
+          // matching what parseInstant truncated to at the edge.
           const result = insertStatement.run(
             reading.sourceId,
             reading.kind,
             reading.value,
-            reading.measuredAt,
-            reading.receivedAt,
+            reading.measuredAt.epochMilliseconds,
+            reading.receivedAt.epochMilliseconds,
           );
           inserted += Number(result.changes);
         }
@@ -113,7 +116,12 @@ export function openReadingStore(path: string): ReadingStore {
     },
 
     readingsInRange(sourceId, kind, fromMeasuredAt, toMeasuredAt) {
-      const rows = rangeStatement.all(sourceId, kind, fromMeasuredAt, toMeasuredAt);
+      const rows = rangeStatement.all(
+        sourceId,
+        kind,
+        fromMeasuredAt.epochMilliseconds,
+        toMeasuredAt.epochMilliseconds,
+      );
       return rows.map((row) => toReading(row, sourceId, kind));
     },
 
@@ -147,7 +155,7 @@ function toReading(row: unknown, sourceId: SensorId, kind: MeasurementKind): Rea
     sourceId,
     kind,
     value: row.value,
-    measuredAt: row.measured_at,
-    receivedAt: row.received_at,
+    measuredAt: Temporal.Instant.fromEpochMilliseconds(row.measured_at),
+    receivedAt: Temporal.Instant.fromEpochMilliseconds(row.received_at),
   };
 }

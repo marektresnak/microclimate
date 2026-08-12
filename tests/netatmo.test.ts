@@ -9,7 +9,7 @@ import type { FetchLike, NetatmoOptions } from '../src/sources/netatmo.ts';
 import { loadRefreshToken, saveRefreshToken } from '../src/sources/netatmo-token.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 
-const NOW = Date.UTC(2026, 7, 11, 12, 0);
+const NOW = Temporal.Instant.from('2026-08-11T12:00:00Z');
 // Deliberately unlike NOW, so a test can tell the vendor's clock from ours.
 const VENDOR_SECONDS = 1_770_000_000;
 
@@ -120,9 +120,9 @@ describe('the netatmo source', () => {
     for (const reading of readings) {
       // Seconds times a thousand — off by that factor every reading dates from
       // 1970 and quietly reads as stale forever.
-      assert.equal(reading.measuredAt, VENDOR_SECONDS * 1000);
-      assert.notEqual(reading.measuredAt, NOW);
-      assert.equal(reading.receivedAt, NOW);
+      assert.equal(reading.measuredAt.epochMilliseconds, VENDOR_SECONDS * 1000);
+      assert.notEqual(reading.measuredAt.epochMilliseconds, NOW.epochMilliseconds);
+      assert.equal(reading.receivedAt.epochMilliseconds, NOW.epochMilliseconds);
     }
   });
 
@@ -148,7 +148,7 @@ describe('the netatmo source', () => {
     const source = createNetatmoSource(options(), fake.impl);
 
     await source.poll(NOW);
-    const readings = await source.poll(NOW + 60_000);
+    const readings = await source.poll(NOW.add({ minutes: 1 }));
 
     assert.equal(readings.find((reading) => reading.kind === 'co2')?.value, 910);
     // The conversation, in order: bootstrap refresh, data, expired data,
@@ -204,7 +204,7 @@ describe('the netatmo source', () => {
     await source.poll(NOW);
     assert.equal(loadRefreshToken(tokenPath), 'rotated-seed-token');
 
-    await source.poll(NOW + 60_000);
+    await source.poll(NOW.add({ minutes: 1 }));
     assert.equal(fake.requests[3]?.form?.get('refresh_token'), 'rotated-seed-token');
     assert.equal(loadRefreshToken(tokenPath), 'rotated-rotated-seed-token');
   });
@@ -259,7 +259,7 @@ describe('the netatmo source', () => {
     const source = createNetatmoSource(options(), fake.impl);
 
     const first = await source.poll(NOW);
-    const second = await source.poll(NOW + 60_000);
+    const second = await source.poll(NOW.add({ minutes: 1 }));
 
     // The idempotency constraint absorbs the repeat for free — the dedup
     // design paying for itself outside the push path it was built for.

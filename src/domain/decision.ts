@@ -30,6 +30,6 @@ export interface ControlOutcome {
   readonly write: boolean;
   // Carried forward by the caller. Undefined means nothing has changed yet, which
   // is both a genuine first run and every restart — the dwell timer is in memory.
-  readonly lastChangeAt: number | undefined;
+  readonly lastChangeAt: Temporal.Instant | undefined;
   readonly reasons: readonly string[];
 }

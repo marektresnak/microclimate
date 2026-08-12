@@ -24,7 +24,7 @@ const HOME_COACH_URL = 'https://api.netatmo.com/api/gethomecoachsdata';
 // A stalled vendor must not stall the collector's whole tick — the same reason
 // the Modbus client carries a budget. Ten seconds is generous for one HTTPS
 // round trip and still small against the poll interval below.
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT = Temporal.Duration.from({ seconds: 10 });
 
 // Netatmo refreshes server-side every 7-8 minutes, so polling faster gains
 // nothing. Polling slower has a bound too: a reading is up to one vendor
@@ -33,7 +33,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 // therefore stay under 7 minutes or a perfectly healthy instrument would
 // periodically read as stale through our own polling. Five minutes gives
 // margin on both sides; the store's uniqueness constraint absorbs the repeats.
-const POLL_INTERVAL_MS = 5 * 60_000;
+const POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 });
 
 export type FetchLike = typeof fetch;
 
@@ -69,7 +69,7 @@ export function createNetatmoSource(
 
     return fetchImpl(url, {
       headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT.total('milliseconds')),
     });
   };
 
@@ -91,7 +91,7 @@ export function createNetatmoSource(
         client_secret: options.clientSecret,
         refresh_token: refreshToken,
       }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT.total('milliseconds')),
     });
 
     if (!response.ok) {
@@ -127,7 +127,7 @@ export function createNetatmoSource(
 
   return {
     name: 'netatmo',
-    pollIntervalMs: POLL_INTERVAL_MS,
+    pollInterval: POLL_INTERVAL,
 
     async poll(now) {
       const first = await fetchHomeCoach(accessToken ?? (await refreshAccessToken()));
@@ -148,7 +148,7 @@ export function createNetatmoSource(
 async function readingsOf(
   response: Response,
   sourceId: SensorId,
-  receivedAt: number,
+  receivedAt: Temporal.Instant,
 ): Promise<Reading[]> {
   if (!response.ok) {
     const body = await response.text();
@@ -158,10 +158,11 @@ async function readingsOf(
   const payload: unknown = await response.json();
   const dashboard = dashboardOf(payload);
 
-  // time_utc is epoch SECONDS; measuredAt is epoch milliseconds. This is the
-  // one real conversion at this edge, and a test pins it: off by that factor,
-  // every reading dates from January 1970 and is discarded as stale.
-  const measuredAt = dashboard.time_utc * 1000;
+  // time_utc is epoch SECONDS, and fromEpochSeconds does not exist — Temporal
+  // dropped it — so the factor of a thousand is written out. A test pins it:
+  // off by that factor, every reading dates from January 1970 and is
+  // discarded as stale.
+  const measuredAt = Temporal.Instant.fromEpochMilliseconds(dashboard.time_utc * 1000);
 
   // The vendor's own timestamp, never the poll time: Netatmo reports minutes
   // after it measures, and freshness is judged on when the instrument spoke.

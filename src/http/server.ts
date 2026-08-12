@@ -51,8 +51,8 @@ import type { ReadingStore } from '../store/readings.ts';
 const AUTHORIZE_URL = 'https://api.netatmo.com/oauth2/authorize';
 // The one scope gethomecoachsdata needs.
 const HOME_COACH_SCOPE = 'read_homecoach';
-const EXCHANGE_TIMEOUT_MS = 10_000;
-const DAY_MS = 24 * 60 * 60_000;
+const EXCHANGE_TIMEOUT = Temporal.Duration.from({ seconds: 10 });
+const DAY = Temporal.Duration.from({ hours: 24 });
 // A command body is one small JSON object; refusing early beats buffering
 // whatever a confused client pours in. Ingest is the exception: a node
 // replaying a buffered backlog sends real batches, and a quarter megabyte is
@@ -74,7 +74,7 @@ export interface ApiServerDependencies {
   readonly unit: VentilationUnit;
   /** Unset disables the two /auth/netatmo routes, with an explanation. */
   readonly netatmoAuth: NetatmoAuthOptions | undefined;
-  readonly clock: () => number;
+  readonly clock: () => Temporal.Instant;
   readonly log: (line: string) => void;
 }
 
@@ -338,7 +338,7 @@ export function createApiServer(
         redirect_uri: auth.redirectUri,
         scope: HOME_COACH_SCOPE,
       }),
-      signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(EXCHANGE_TIMEOUT.total('milliseconds')),
     });
 
     if (!exchanged.ok) {
@@ -380,7 +380,7 @@ export function createApiServer(
     fromRaw: string | undefined,
     toRaw: string | undefined,
     kindRaw: string | undefined,
-    now: number,
+    now: Temporal.Instant,
   ): { from: string; to: string; readings: ReadingBody[] } | { error: string } {
     const range = rangeOf(fromRaw, toRaw, now);
     if ('error' in range) return range;
@@ -395,7 +395,7 @@ export function createApiServer(
         readings.push(...dependencies.store.readingsInRange(sensorId, kind, range.from, range.to));
       }
     }
-    readings.sort((first, second) => first.measuredAt - second.measuredAt);
+    readings.sort((first, second) => Temporal.Instant.compare(first.measuredAt, second.measuredAt));
 
     // Sorted as numbers, then written as text. The two orders agree for UTC
     // ISO strings anyway, but sorting the instants is the honest version.
@@ -418,15 +418,15 @@ const BAD_RANGE = 'from and to must be ISO 8601 timestamps with a zone, e.g. 202
 function rangeOf(
   fromRaw: string | undefined,
   toRaw: string | undefined,
-  now: number,
-): { from: number; to: number } | { error: string } {
+  now: Temporal.Instant,
+): { from: Temporal.Instant; to: Temporal.Instant } | { error: string } {
   // Refusing an unparseable bound beats an empty result, which a client would
   // read as "no data". An inverted range needs no such guard — the store
   // honestly returns nothing for it.
   const to = toRaw === undefined ? now : parseInstant(toRaw);
   if (to === undefined) return { error: BAD_RANGE };
 
-  const from = fromRaw === undefined ? to - DAY_MS : parseInstant(fromRaw);
+  const from = fromRaw === undefined ? to.subtract(DAY) : parseInstant(fromRaw);
   if (from === undefined) return { error: BAD_RANGE };
 
   return { from, to };

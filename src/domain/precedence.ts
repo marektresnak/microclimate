@@ -20,22 +20,22 @@ export function resolveSignal(
   room: RoomId,
   kind: MeasurementKind,
   readings: readonly Reading[],
-  now: number,
+  now: Temporal.Instant,
 ): RoomSignal {
   const ranked = PRECEDENCE[room][kind] ?? [];
 
   // Kept as we go, in case nothing turns out to be fresh (Q3).
   let newestStale: RoomSignal = { status: 'missing' };
-  let newestStaleMeasuredAt = Number.NEGATIVE_INFINITY;
+  let newestStaleMeasuredAt: Temporal.Instant | undefined;
 
   for (const sourceId of ranked) {
     const sensor = SENSORS[sourceId];
     const latest = newestReadingFrom(readings, sourceId, kind);
-    const signal = toRoomSignal(latest, now, sensor.freshnessWindowMs);
+    const signal = toRoomSignal(latest, now, sensor.freshnessWindow);
 
     if (signal.status === 'fresh') return signal;
 
-    if (signal.status === 'stale' && signal.measuredAt > newestStaleMeasuredAt) {
+    if (signal.status === 'stale' && (newestStaleMeasuredAt === undefined || Temporal.Instant.compare(signal.measuredAt, newestStaleMeasuredAt) > 0)) {
       newestStale = signal;
       newestStaleMeasuredAt = signal.measuredAt;
     }
@@ -54,7 +54,9 @@ function newestReadingFrom(
   for (const reading of readings) {
     if (reading.sourceId !== sourceId) continue;
     if (reading.kind !== kind) continue;
-    if (newest === undefined || reading.measuredAt > newest.measuredAt) newest = reading;
+    if (newest === undefined || Temporal.Instant.compare(reading.measuredAt, newest.measuredAt) > 0) {
+      newest = reading;
+    }
   }
 
   return newest;

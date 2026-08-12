@@ -136,12 +136,12 @@ export interface ModbusUnitOptions {
   readonly port: number;
   readonly unitId: number;
   /** Covers connecting as well as waiting for the answer — see `openTcpStream`. */
-  readonly timeoutMs: number;
+  readonly timeout: Temporal.Duration;
   readonly retries: number;
   /** Between attempts. Reconnecting the instant a device refused you is the
    * least likely attempt to succeed, and four of those inside a millisecond is
    * one attempt wearing a disguise. */
-  readonly retryPauseMs: number;
+  readonly retryPause: Temporal.Duration;
 }
 
 // TEACHING: a factory function, not a class. It returns an object holding two
@@ -167,6 +167,12 @@ export function createModbusUnit(
     throw new Error(`unit id ${options.unitId} is not a Modbus slave address (1-247)`);
   }
 
+  // The one place the option durations become numbers. Everything below is
+  // budget arithmetic against performance.now() and setTimeout, both of which
+  // speak milliseconds; converting at every use would be ceremony.
+  const timeoutMs = options.timeout.total('milliseconds');
+  const retryPauseMs = options.retryPause.total('milliseconds');
+
   // Monotonic across the process, so a reply to an earlier request can never be
   // mistaken for the answer to this one.
   let lastTransactionId = 0;
@@ -186,7 +192,7 @@ export function createModbusUnit(
     // persistent socket is state to manage — stale connections, reconnection,
     // half-open detection — bought with nothing.
     //
-    // `timeoutMs` is the budget for the whole attempt, not for each half of it.
+    // The timeout is the budget for the whole attempt, not for each half of it.
     // Spending a full timeout on connecting and then another on waiting makes a
     // "five second" attempt take ten, and enough of those overrun the thirty
     // second cycle they are supposed to fit inside.
@@ -195,12 +201,12 @@ export function createModbusUnit(
     // monotonic — it cannot jump backwards when the machine syncs its clock,
     // which would otherwise make `remaining` nonsense.
     const startedAt = performance.now();
-    const stream = await openStream(options.host, options.port, options.timeoutMs);
+    const stream = await openStream(options.host, options.port, timeoutMs);
 
     try {
-      const remaining = options.timeoutMs - (performance.now() - startedAt);
+      const remaining = timeoutMs - (performance.now() - startedAt);
       if (remaining <= 0) {
-        throw new Error(`connecting to ${options.host} used the whole ${options.timeoutMs} ms`);
+        throw new Error(`connecting to ${options.host} used the whole ${timeoutMs} ms`);
       }
 
       return await sendAndWait(stream, request, remaining);
@@ -233,7 +239,7 @@ export function createModbusUnit(
         // failures land here. Everything after this block is a frame we
         // actually received, and it is deliberately outside the try.
         lastFailure = error instanceof Error ? error : new Error(String(error));
-        if (attempt < options.retries) await pause(options.retryPauseMs);
+        if (attempt < options.retries) await pause(retryPauseMs);
         continue;
       }
 

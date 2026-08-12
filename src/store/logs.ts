@@ -45,14 +45,14 @@ INSERT INTO logs (at, message) VALUES (?, ?)
 `;
 
 export interface LogLine {
-  readonly at: number;
+  readonly at: Temporal.Instant;
   readonly message: string;
 }
 
 export interface LogStore {
-  append(at: number, message: string): void;
+  append(at: Temporal.Instant, message: string): void;
   /** Half-open [from, to), the same rule as the readings range. */
-  linesInRange(fromAt: number, toAt: number): LogLine[];
+  linesInRange(fromAt: Temporal.Instant, toAt: Temporal.Instant): LogLine[];
   close(): void;
 }
 
@@ -68,11 +68,11 @@ export function openLogStore(path: string): LogStore {
 
   return {
     append(at, message) {
-      insertStatement.run(at, message);
+      insertStatement.run(at.epochMilliseconds, message);
     },
 
     linesInRange(fromAt, toAt) {
-      const rows = rangeStatement.all(fromAt, toAt);
+      const rows = rangeStatement.all(fromAt.epochMilliseconds, toAt.epochMilliseconds);
       return rows.map(toLogLine);
     },
 
@@ -93,5 +93,5 @@ function toLogLine(row: unknown): LogLine {
     throw new Error('log line has no message');
   }
 
-  return { at: row.at, message: row.message };
+  return { at: Temporal.Instant.fromEpochMilliseconds(row.at), message: row.message };
 }

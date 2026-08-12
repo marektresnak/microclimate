@@ -7,10 +7,10 @@ import type { SensorSource } from '../src/sources/source.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import type { ReadingStore } from '../src/store/readings.ts';
 
-const NOON = Date.UTC(2026, 0, 15, 12, 0);
-const MINUTE = 60_000;
+const NOON = Temporal.Instant.from('2026-01-15T12:00:00Z');
+const MINUTE = Temporal.Duration.from({ minutes: 1 });
 
-function countingSource(name: string, intervalMs: number, value: number): {
+function countingSource(name: string, interval: Temporal.Duration, value: number): {
   readonly source: SensorSource;
   polls: number;
 } {
@@ -18,8 +18,8 @@ function countingSource(name: string, intervalMs: number, value: number): {
     polls: 0,
     source: {
       name,
-      pollIntervalMs: intervalMs,
-      async poll(now: number): Promise<readonly Reading[]> {
+      pollInterval: interval,
+      async poll(now: Temporal.Instant): Promise<readonly Reading[]> {
         counter.polls += 1;
         return [{ sourceId: 'bedroom_netatmo', kind: 'co2', value, measuredAt: now, receivedAt: now }];
       },
@@ -32,7 +32,7 @@ function countingSource(name: string, intervalMs: number, value: number): {
 function brokenSource(name: string): SensorSource {
   return {
     name,
-    pollIntervalMs: MINUTE,
+    pollInterval: MINUTE,
     async poll() {
       throw new Error('vendor returned 500');
     },
@@ -66,7 +66,7 @@ describe('the collector', () => {
 
   it('respects each source cadence rather than polling on every tick', async () => {
     const store = openReadingStore(':memory:');
-    const slow = countingSource('netatmo', 5 * MINUTE, 840);
+    const slow = countingSource('netatmo', Temporal.Duration.from({ minutes: 5 }), 840);
     const fast = countingSource('tado', MINUTE, 21);
     const collector = createCollector({
       sources: [slow.source, fast.source],
@@ -75,8 +75,8 @@ describe('the collector', () => {
     });
 
     await collector.tick(NOON);
-    await collector.tick(NOON + MINUTE);
-    await collector.tick(NOON + 2 * MINUTE);
+    await collector.tick(NOON.add({ minutes: 1 }));
+    await collector.tick(NOON.add({ minutes: 2 }));
 
     assert.equal(slow.polls, 1);
     assert.equal(fast.polls, 3);
@@ -86,11 +86,11 @@ describe('the collector', () => {
 
   it('asks a source again once its interval has elapsed', async () => {
     const store = openReadingStore(':memory:');
-    const slow = countingSource('netatmo', 5 * MINUTE, 840);
+    const slow = countingSource('netatmo', Temporal.Duration.from({ minutes: 5 }), 840);
     const collector = createCollector({ sources: [slow.source], store, log: recorder().log });
 
     await collector.tick(NOON);
-    await collector.tick(NOON + 5 * MINUTE);
+    await collector.tick(NOON.add({ minutes: 5 }));
 
     assert.equal(slow.polls, 2);
 
@@ -128,7 +128,7 @@ describe('the collector', () => {
     const collector = createCollector({ sources: [netatmo.source], store: failing, log: log.log });
 
     await collector.tick(NOON);
-    await collector.tick(NOON + MINUTE);
+    await collector.tick(NOON.add({ minutes: 1 }));
 
     // The tick survived — the second poll happened — and the log names the
     // store, not the vendor.
@@ -141,7 +141,7 @@ describe('the collector', () => {
     const log = recorder();
     const repeating: SensorSource = {
       name: 'netatmo',
-      pollIntervalMs: MINUTE,
+      pollInterval: MINUTE,
       // The same reading with the same measuredAt, as Netatmo hands back inside
       // its 7-8 minute refresh window.
       async poll() {
@@ -151,7 +151,7 @@ describe('the collector', () => {
     const collector = createCollector({ sources: [repeating], store, log: log.log });
 
     await collector.tick(NOON);
-    await collector.tick(NOON + MINUTE);
+    await collector.tick(NOON.add({ minutes: 1 }));
 
     const lines = log.lines.join('\n');
     assert.match(lines, /1 readings, 1 new/);

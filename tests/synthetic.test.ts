@@ -5,7 +5,7 @@ import { SENSORS } from '../src/config.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from '../src/sources/synthetic.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 
-const NOW = Date.UTC(2026, 0, 15, 21, 0, 0); // 22:00 in Prague
+const NOW = Temporal.Instant.from('2026-01-15T21:00:00Z'); // 22:00 in Prague
 
 describe('the synthetic sources', () => {
   it('report exactly the kinds their sensors are configured to report', async () => {
@@ -40,11 +40,13 @@ describe('the synthetic sources', () => {
     const store = openReadingStore(':memory:');
 
     const first = await source.poll(NOW);
-    const twoMinutesLater = await source.poll(NOW + 2 * 60_000);
+    const twoMinutesLater = await source.poll(NOW.add({ minutes: 2 }));
 
+    // Compared as epoch numbers: two different instants deepEqual as equal, so
+    // comparing the instants themselves would pass even if quantisation broke.
     assert.deepEqual(
-      first.map((reading) => reading.measuredAt),
-      twoMinutesLater.map((reading) => reading.measuredAt),
+      first.map((reading) => reading.measuredAt.epochMilliseconds),
+      twoMinutesLater.map((reading) => reading.measuredAt.epochMilliseconds),
     );
     assert.equal(store.insert(first), 3);
     assert.equal(store.insert(twoMinutesLater), 0);
@@ -53,16 +55,19 @@ describe('the synthetic sources', () => {
   });
 
   it('separates when a reading was measured from when we heard about it', async () => {
-    const readings = await createSyntheticNetatmo().poll(NOW + 3 * 60_000);
+    const readings = await createSyntheticNetatmo().poll(NOW.add({ minutes: 3 }));
 
     for (const reading of readings) {
-      assert.ok(reading.measuredAt < reading.receivedAt, 'Netatmo reports minutes after it measures');
+      assert.ok(
+        Temporal.Instant.compare(reading.measuredAt, reading.receivedAt) < 0,
+        'Netatmo reports minutes after it measures',
+      );
     }
   });
 
   it('drives the bedroom above the sleep threshold overnight and clears it by lunchtime', async () => {
-    const night = await createSyntheticNetatmo().poll(Date.UTC(2026, 0, 15, 3, 0)); // 04:00 local
-    const midday = await createSyntheticNetatmo().poll(Date.UTC(2026, 0, 15, 12, 0)); // 13:00 local
+    const night = await createSyntheticNetatmo().poll(Temporal.Instant.from('2026-01-15T03:00:00Z')); // 04:00 local
+    const midday = await createSyntheticNetatmo().poll(Temporal.Instant.from('2026-01-15T12:00:00Z')); // 13:00 local
 
     const nightCo2 = night.find((reading) => reading.kind === 'co2')?.value ?? 0;
     const middayCo2 = midday.find((reading) => reading.kind === 'co2')?.value ?? 0;

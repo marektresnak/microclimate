@@ -241,8 +241,13 @@ types, per-source freshness, config-only topology, and the storage schema.
 ## Conventions
 
 - `node:test` + `node:assert/strict`. No framework.
-- **Time is a parameter.** No `Date.now()` inside any logic under test. A fixed `now` is passed
-  in, so no test sleeps and no test is flaky.
+- **Time is a parameter.** No clock read inside any logic under test. A fixed `now` — a
+  `Temporal.Instant` since 2026-08-12 — is passed in, so no test sleeps and no test is flaky.
+- **Instants never meet a bare `deepEqual`.** An instant's state lives in internal slots that
+  `assert.deepEqual` cannot see, so two *different* instants compare as deeply equal and a wrong
+  timestamp passes silently. Instant-bearing shapes are asserted through
+  `tests/support/deep-equal.ts`, which writes instants out as ISO strings first; single instants
+  compare by `epochMilliseconds`.
 - **Fakes, not mocks.** `actuator/fake.ts` records the levels it was told to set. Sources are
   plain functions returning canned readings. Nothing asserts on call counts of a mocking library.
 - **Table-driven** where cases are uniform (threshold maps, quiet-hours boundaries); individually
@@ -579,10 +584,16 @@ Quiet hours assert it. Fresh bedroom CO₂ above 700 only *extends* an assertion
 - **and instants the zone separates stay separated**: one wall clock at opposite ends of the
   offset range is 25 hours apart across three calendar days
 - refuses a zone-less timestamp, a bare date, and epoch milliseconds in either spelling
-- refuses dates that do not exist. `Date.parse` rejects month 13, hour 25 and minute 61 on its
-  own; **day of the month is the one field it rolls forward instead**, so `2026-02-31`,
-  `2026-04-31` and `2027-02-29` are pinned — and `2028-02-29`, which does exist, is pinned beside
-  them so the guard cannot be tightened into rejecting leap days
+- refuses dates that do not exist. `2026-02-31`, `2026-04-31` and `2027-02-29` are pinned — and
+  `2028-02-29`, which does exist, is pinned beside them so the guard cannot be tightened into
+  rejecting leap days. *Reworded 2026-08-12: Temporal refuses these natively, where the first
+  build had to rebuild the date by hand because `Date.parse` rolls an impossible day forward.
+  The cases stay pinned so a retreat to `Date.parse` fails loudly.*
+- **accepts the RFC 9557 spellings the hand-rolled grammar refused** (2026-08-12, with the move
+  to `Temporal.Instant.from`): space and lowercase separators, a bracketed zone annotation, the
+  compact form — pinned so the widening reads as a decision, not an accident
+- **truncates sub-millisecond input to the millisecond the store thinks in** — one instant, one
+  representation, or the uniqueness constraint could meet a nanosecond twin
 - round-trips whatever it wrote
 
 ## `store/readings.ts`

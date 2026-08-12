@@ -13,12 +13,12 @@ import {
 
 // Europe/Prague is UTC+1 in January, so every start time below is written as UTC
 // with the local hour it means.
-const AT_2100 = Date.UTC(2026, 0, 15, 20, 0);
-const AT_2150 = Date.UTC(2026, 0, 15, 20, 50);
-const AT_2200 = Date.UTC(2026, 0, 15, 21, 0);
-const AT_1900 = Date.UTC(2026, 0, 15, 18, 0);
-const AT_1200 = Date.UTC(2026, 0, 15, 11, 0);
-const AT_0700 = Date.UTC(2026, 0, 15, 6, 0);
+const AT_2100 = Temporal.Instant.from('2026-01-15T20:00:00Z');
+const AT_2150 = Temporal.Instant.from('2026-01-15T20:50:00Z');
+const AT_2200 = Temporal.Instant.from('2026-01-15T21:00:00Z');
+const AT_1900 = Temporal.Instant.from('2026-01-15T18:00:00Z');
+const AT_1200 = Temporal.Instant.from('2026-01-15T11:00:00Z');
+const AT_0700 = Temporal.Instant.from('2026-01-15T06:00:00Z');
 
 describe('overnight, clearing late', () => {
   // The regression two independent reviewers found by reasoning, and the reason
@@ -367,7 +367,7 @@ describe('a restart mid-trace', () => {
   it('waits out the dwell when nothing has restarted', async () => {
     const secondCommand = commands(await runTrace(falling))[1];
 
-    assert.equal(secondCommand?.minute, CONTROL.minDwellMinutes);
+    assert.equal(secondCommand?.minute, CONTROL.minDwell.minutes);
   });
 
   it('acts on the next cycle after a restart, because the timer is in memory', async () => {

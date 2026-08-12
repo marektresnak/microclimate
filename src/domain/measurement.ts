@@ -37,6 +37,6 @@ export interface Reading {
   // Never conflated. Netatmo reports minutes after it measured, and a push node
   // replaying a buffered backlog delivers hours-old readings in one request.
   // Freshness is always judged on measuredAt.
-  readonly measuredAt: number; // epoch ms, UTC — when the instrument took it
-  readonly receivedAt: number; // epoch ms, UTC — when we learned about it
+  readonly measuredAt: Temporal.Instant; // when the instrument took it
+  readonly receivedAt: Temporal.Instant; // when we learned about it
 }

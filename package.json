@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Collects readings from home sensors and drives the HRV unit based on air quality.",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.ts",
@@ -14,7 +14,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "typescript": "^5.8.0"
+    "typescript": "^6.0.0"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.0",

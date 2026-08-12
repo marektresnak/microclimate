@@ -3,21 +3,22 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
 import { RANGE_QUERY_SQL, SCHEMA, openLogStore } from '../src/store/logs.ts';
+import { assertDeepEqual } from './support/deep-equal.ts';
 
-const NOW = Date.UTC(2026, 7, 12, 12, 0, 0);
-const MINUTE = 60_000;
+const NOW = Temporal.Instant.from('2026-08-12T12:00:00Z');
+const BEGINNING = Temporal.Instant.fromEpochMilliseconds(0);
 
 describe('the log store', () => {
   it('stores lines and reads back the ones in range', () => {
     const store = openLogStore(':memory:');
 
-    store.append(NOW - 3 * MINUTE, 'bedroom_netatmo: 3 readings, 3 new');
-    store.append(NOW - 2 * MINUTE, '50% set over the API');
-    store.append(NOW - MINUTE, 'bedroom_netatmo did not report: fetch failed');
+    store.append(NOW.subtract({ minutes: 3 }), 'bedroom_netatmo: 3 readings, 3 new');
+    store.append(NOW.subtract({ minutes: 2 }), '50% set over the API');
+    store.append(NOW.subtract({ minutes: 1 }), 'bedroom_netatmo did not report: fetch failed');
 
-    assert.deepEqual(store.linesInRange(NOW - 2 * MINUTE, NOW), [
-      { at: NOW - 2 * MINUTE, message: '50% set over the API' },
-      { at: NOW - MINUTE, message: 'bedroom_netatmo did not report: fetch failed' },
+    assertDeepEqual(store.linesInRange(NOW.subtract({ minutes: 2 }), NOW), [
+      { at: NOW.subtract({ minutes: 2 }), message: '50% set over the API' },
+      { at: NOW.subtract({ minutes: 1 }), message: 'bedroom_netatmo did not report: fetch failed' },
     ]);
 
     store.close();
@@ -33,7 +34,7 @@ describe('the log store', () => {
     store.append(NOW, 'third');
 
     assert.deepEqual(
-      store.linesInRange(NOW, NOW + 1).map((line) => line.message),
+      store.linesInRange(NOW, NOW.add({ milliseconds: 1 })).map((line) => line.message),
       ['first', 'second', 'third'],
     );
 
@@ -45,10 +46,10 @@ describe('the log store', () => {
     // failures a minute apart are two facts, not one.
     const store = openLogStore(':memory:');
 
-    store.append(NOW - MINUTE, 'bedroom_netatmo did not report: fetch failed');
+    store.append(NOW.subtract({ minutes: 1 }), 'bedroom_netatmo did not report: fetch failed');
     store.append(NOW, 'bedroom_netatmo did not report: fetch failed');
 
-    assert.equal(store.linesInRange(0, NOW + 1).length, 2);
+    assert.equal(store.linesInRange(BEGINNING, NOW.add({ milliseconds: 1 })).length, 2);
     store.close();
   });
 
@@ -56,10 +57,10 @@ describe('the log store', () => {
     // Half-open [from, to), the same rule as the readings range: adjacent
     // windows tile, so a line on the boundary lands in exactly one of them.
     const store = openLogStore(':memory:');
-    store.append(NOW - 2 * MINUTE, 'on the from bound');
-    store.append(NOW - MINUTE, 'on the to bound');
+    store.append(NOW.subtract({ minutes: 2 }), 'on the from bound');
+    store.append(NOW.subtract({ minutes: 1 }), 'on the to bound');
 
-    const window = store.linesInRange(NOW - 2 * MINUTE, NOW - MINUTE);
+    const window = store.linesInRange(NOW.subtract({ minutes: 2 }), NOW.subtract({ minutes: 1 }));
 
     assert.deepEqual(
       window.map((line) => line.message),
@@ -71,12 +72,14 @@ describe('the log store', () => {
   it('reports nothing before the first line was written', () => {
     const store = openLogStore(':memory:');
 
-    assert.deepEqual(store.linesInRange(0, NOW), []);
+    assertDeepEqual(store.linesInRange(BEGINNING, NOW), []);
     store.close();
   });
 });
 
 describe('the log schema', () => {
+  // These two speak raw SQL, below the store's Instant boundary, so epoch
+  // milliseconds appear here as the numbers the column actually holds.
   it('renders at as readable ISO without storing it', () => {
     // The same generated-column trick the readings table uses, for the same
     // reason: SELECT * stays legible without a converter.
@@ -101,7 +104,7 @@ describe('the log schema', () => {
 
     const plan = database
       .prepare(`EXPLAIN QUERY PLAN ${RANGE_QUERY_SQL}`)
-      .all(0, NOW)
+      .all(0, NOW.epochMilliseconds)
       .map((row) => (row !== null && typeof row === 'object' && 'detail' in row ? row.detail : ''))
       .join('\n');
 
