@@ -223,6 +223,18 @@ Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push l
   still keeps each field's own stamp, because they are two fields and letting one speak for the
   other would be a rule the payload does not state.
 
+  **Publication gaps measured over 45 minutes: 6 to 19.7 minutes**, across the three zones. The
+  20-minute heartbeat holds as the upper bound, which is what the freshness window was derived
+  against — a worst case of 19.7 plus a one-minute poll interval, comfortably inside 25.
+
+  **The heartbeat does re-publish an unchanged value, and it is stored.** `bedroom_tado` humidity
+  read 38.2 at 07:52:57, 38.3 at 08:12:39 and 38.2 again at 08:30:38: three facts about three
+  moments, three rows, because the instrument genuinely spoke three times. The uniqueness
+  constraint is on `(source_id, kind, measured_at)` and the instant is what differs, so nothing
+  here is a duplicate — this is the dedup rule doing exactly what it says rather than a case it
+  fails to catch. It does mean this source's collector line reads "6 readings, 2 new" where
+  Netatmo's reads "3 readings, 0 new": a difference in the vendors, not something to fix.
+
   **A zone with nothing to say is skipped in silence**, and the other zones' readings still land:
   not connected, no sensors, missing from the answer. The report of that gap is `/api/state`
   turning the room stale against its own window, which is what the window is for — where a line
@@ -889,22 +901,12 @@ These are unresolved. Do not invent answers — ask.
 3. **Push authentication — decided (2026-08-11): none.** Every endpoint is open on the trusted
    LAN; the acceptance and its bounds are recorded in the read-API section. If exposure ever
    grows beyond the LAN or tailnet, auth arrives at the edge, in front of the whole service.
-4. **Tado is verified against the real account (2026-08-14) — one thing is still unobserved.**
-   The first authorised session settled everything that was open: the zone ids are in `TADO_ZONES`,
-   the `zoneStates` envelope is what the adapter expected, `link.state` is `ONLINE` and is no longer
-   read, and one poll produced `tado: 6 readings, 6 new` with all three rooms answering `/api/state`
-   under the right sourceIds. All of it is written up in the Tado entry under "The physical setup".
 
-   **What the heartbeat does to dedup is still unobserved.** If Tado re-publishes an unchanged
-   value with an advanced timestamp every ~20 minutes, this source stores "new" rows of unchanged
-   values and its collector line reads "N new" where Netatmo's reads "0 new" inside its refresh
-   window. Correct either way — the instrument genuinely spoke again — and there is a comment in
-   the adapter so nobody "fixes" it. It needs an hour of running to say which; nothing depends on
-   the answer.
-
-   Also unobserved, and cheap to leave that way: what a `HOT_WATER` zone's `sensorDataPoints` looks
-   like (this account has no such zone at all — the discovery log would name it, and either absent
-   or `{}` yields no readings).
+*Tado was the fourth entry here until 2026-08-14, when one authorised session answered all of it —
+the zone ids, the `zoneStates` envelope, `link.state`, the expired-token refusal, the publication
+gaps and what the heartbeat does to dedup. It is all written up in the Tado entry under "The
+physical setup". The only thing left unknown is what a `HOT_WATER` zone's `sensorDataPoints` looks
+like, and this account has no such zone to ask.*
 
 ---
 
