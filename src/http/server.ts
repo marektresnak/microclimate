@@ -26,30 +26,21 @@ import type { LogLine, LogStore } from '../store/logs.ts';
 import type { ReadingStore } from '../store/readings.ts';
 
 /**
- * The read API and the two open writes (fan level, ingest) — uniform JSON,
- * end to end. The vendor onboarding routes, the API's human-facing half, live
- * in netatmo-auth.ts and tado-auth.ts and are mounted whole below. Routes are declared on Hono
- * and served through `getRequestListener`, so this still returns an ordinary
- * `node:http` Server and nothing that wires or tests it knows a framework is
- * underneath.
+ * The read API and the two open writes (fan level, ingest) — uniform JSON, end
+ * to end. The vendor onboarding routes, the API's human-facing half, live in
+ * netatmo-auth.ts and tado-auth.ts and are mounted whole below. Routes are
+ * declared on Hono and served through `getRequestListener`, so this still
+ * returns an ordinary `node:http` Server and nothing that wires or tests it
+ * knows a framework is underneath.
  *
- * Hono and its node adapter are the project's only runtime dependencies,
- * admitted for exactly this layer: route dispatch, body reading and response
- * plumbing are boilerplate that kept failing the review contract's own
- * readability test, and they are also the code a framework can absorb without
- * absorbing any decision. Everything that decides — narrowing, precedence,
- * the OAuth state — is the same code it was without it.
- *
- * No endpoint carries auth — single home, trusted LAN, as designed. That
- * includes the two writes, which reverses an earlier decision and a review
- * finding; the acceptance and its bounds are recorded in CLAUDE.md ("Both
- * write endpoints are open on the LAN"). What any caller can do is bounded by
- * construction: 20-80, never off, never above the grille ceiling.
+ * No endpoint carries auth — single home, trusted LAN, deliberate. Do not add
+ * it here; the acceptance and its bounds are in CLAUDE.md, "Both write
+ * endpoints are open on the LAN".
  *
  * Time arrives through `clock`, so every test runs against a fixed instant —
  * and the Tado onboarding route needs it for a second reason: a device code has
  * a deadline. `fetchImpl` exists for the onboarding modules' token exchanges and
- * passes straight through to them — a canned vendor in the tests, `fetch` in main.
+ * passes straight through to them.
  */
 
 const DAY = Temporal.Duration.from({ hours: 24 });
@@ -74,14 +65,6 @@ export interface ApiServerDependencies {
   readonly clock: () => Temporal.Instant;
   readonly log: (line: string) => void;
 }
-
-/**
- * Every instant this API writes is an ISO 8601 string in UTC, and every one it
- * reads is an ISO 8601 string with an explicit zone. Epoch milliseconds are the
- * store's business — they are there so `measured_at` has one representation per
- * instant inside a uniqueness constraint, which is an argument about a column
- * and not about a wire format. `domain/time.ts` is the whole conversion.
- */
 
 /** What /api/state says about one (room, kind). */
 type SignalBody =
@@ -233,15 +216,9 @@ export function createApiServer(
     return c.json({ level });
   });
 
-  // Open like every write on this LAN, and this one carries the sharper risk
-  // of the two: a poisoned reading outlives its request, and the day an
-  // automation drives the fan from CO2, invented bedroom readings steer it.
-  // Accepted knowingly — the decision and its bounds are in CLAUDE.md beside
-  // the unit endpoint's.
-  //
   // 200 whenever the batch was processed, verdicts inside: a rejected reading
-  // cannot be fixed by resending it, so a status a simple node reads as
-  // "retry" would have it replaying poison forever.
+  // cannot be fixed by resending it, so a status a simple node reads as "retry"
+  // would have it replaying poison forever.
   app.post('/api/readings', bodyLimit({ maxSize: INGEST_BODY_BYTES }), async (c) => {
     let body: unknown;
     try {

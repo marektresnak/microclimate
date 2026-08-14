@@ -14,17 +14,16 @@ import type { ReadingStore } from '../store/readings.ts';
  * and a node that buffered through an outage replays its backlog with the
  * original timestamps intact.
  *
- * One invalid reading does not discard the batch (Q6, decided as the plan
- * recommended): the valid readings are stored and the rejects are reported
- * back, each with its index and the reason. A node cannot fix a bad reading
- * by resending it, so failing the whole batch would just make eight good
- * readings hostage to one bad one, forever.
+ * One invalid reading does not discard the batch: the valid readings are stored
+ * and the rejects are reported back, each with its index and the reason. A node
+ * cannot fix a bad reading by resending it, so failing the whole batch would
+ * hold eight good readings hostage to one bad one, forever.
  */
 
 // Reject the future beyond ordinary clock skew: a node reporting from 2106
 // would otherwise look eternally fresh and poison every decision downstream.
-// The past is deliberately unbounded (F6) — a replayed backlog is exactly the
-// data batching exists to carry, and INSERT OR IGNORE already makes replay
+// The past is deliberately unbounded — a replayed backlog is exactly the data
+// batching exists to carry, and INSERT OR IGNORE already makes replay
 // idempotent at any age.
 const FUTURE_SKEW = Temporal.Duration.from({ minutes: 5 });
 

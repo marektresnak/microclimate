@@ -25,14 +25,11 @@ CREATE TABLE IF NOT EXISTS readings (
 `;
 
 // The dedup constraint doubles as the query index: (source_id, kind, measured_at)
-// is exactly the prefix a room-history query matches on, so there is no second
-// index and no denormalised room column. The test asserts the query plan, which
-// is cheap and fails loudly if someone later reorders the constraint.
+// is exactly the prefix this matches on, so there is no second index and no
+// denormalised room column. A test asserts the query plan, so reordering the
+// constraint fails loudly.
 //
-// Half-open [from, to): adjacent windows tile, so a client walking
-// "00:00-06:00, 06:00-12:00" sees a reading measured exactly at 06:00 once —
-// neither dropped down a crack nor counted twice, which inclusive-both-ends
-// (the first build of this query) got wrong on the second half.
+// Half-open [from, to), so adjacent windows tile — see CLAUDE.md, "The read API".
 export const RANGE_QUERY_SQL = `
 SELECT value, measured_at, received_at FROM readings
 WHERE source_id = ? AND kind = ? AND measured_at >= ? AND measured_at < ?

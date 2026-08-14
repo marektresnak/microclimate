@@ -10,10 +10,6 @@ import type { FetchLike, SensorSource } from './source.ts';
  * Pull adapter: OAuth refresh flow, then `gethomecoachsdata`. The endpoint and
  * flow are the ones proven by the owner's netatmo-sync worker, which has been
  * polling this same device for months — not taken from documentation.
- *
- * `fetchImpl` is the seam, exactly as `OpenStream` is in the Modbus client:
- * everything above it is protocol logic tested against canned responses, and
- * only `main.ts` ever passes the real `fetch`.
  */
 
 // Exported because the OAuth callback in the HTTP server exchanges its code
@@ -27,32 +23,25 @@ const HOME_COACH_URL = 'https://api.netatmo.com/api/gethomecoachsdata';
 const REQUEST_TIMEOUT = Temporal.Duration.from({ seconds: 10 });
 
 // How Netatmo says an access token has aged out: HTTP 403 carrying its own
-// error code 3. Not the 401 this adapter first assumed — and the assumption
-// was not cheap. The test pinned the guess, so the suite stayed green while
-// the retry below could never fire against the real API, and polling died
-// about three hours after every start. Measured live on 2026-08-14. Both
-// halves are checked because both were observed; neither is inferred from how
-// OAuth APIs usually behave, which is the reasoning that produced the bug.
+// error code 3, not the 401 an OAuth API is usually assumed to answer with.
+// Both halves are checked because both were measured; do not infer either from
+// how OAuth APIs usually behave. A 403 with any other code is a permission,
+// which a fresh token does not fix.
 const EXPIRED_TOKEN_STATUS = 403;
 const EXPIRED_TOKEN_CODE = 3;
 
 // Netatmo refreshes server-side every 7-8 minutes, so polling faster gains
-// nothing. Polling slower has a bound too: a reading is up to one vendor
-// refresh old when fetched, plus up to one poll interval older before we ask
-// again. Against the 15-minute freshness window in config, the interval must
-// therefore stay under 7 minutes or a perfectly healthy instrument would
-// periodically read as stale through our own polling. Five minutes gives
-// margin on both sides; the store's uniqueness constraint absorbs the repeats.
+// nothing. Polling slower is bounded by the 15-minute freshness window in
+// config: an 8-minute refresh plus one poll interval has to fit inside it, so
+// the interval must stay under 7. Five gives margin on both sides.
 const POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 });
 
 /**
- * The app registration and the token file — one identity, built once in
- * main.ts and handed whole to both of its consumers: this adapter and the
- * /auth/netatmo onboarding routes. Sharing the object is what keeps them
- * agreeing on `tokenPath`; an onboarding that saved a token where the poller
- * does not read would be a lockout wearing a success page. `redirectUri`
- * belongs to the onboarding half alone — the poller carries it unread, the
- * price of one type instead of two overlapping ones.
+ * The app registration and the token file — one identity, built once in main.ts
+ * and handed whole to this adapter and to the /auth/netatmo routes, so the two
+ * cannot disagree about `tokenPath`. `redirectUri` belongs to the onboarding
+ * half alone — the poller carries it unread, the price of one type instead of
+ * two overlapping ones.
  */
 export interface NetatmoSettings {
   readonly clientId: string;

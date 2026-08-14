@@ -12,12 +12,11 @@ import type { VentilationUnit } from './unit.ts';
  * be read in one sitting and tested byte by byte against a fake stream.
  *
  * Every protocol detail below — register number, value encoding, framing,
- * timeout, retries — has been confirmed against the real unit, not only
- * against a fake stream.
+ * timeout, retries — has been confirmed against the real unit.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TEACHING NOTES — what Modbus actually is, for reading the rest of this file
+// WHAT MODBUS IS — background for reading the rest of this file
 //
 // Modbus is a 1979 industrial protocol. A device exposes an array of 16-bit
 // "registers" and you read or write them by number. There are no names, no
@@ -42,7 +41,7 @@ import type { VentilationUnit } from './unit.ts';
 //   unit id         which device, for gateways that front several. Ours is 1
 //   function code   what to do: 0x03 read, 0x06 write
 //
-// **PDU** is "Protocol Data Unit" — the function code plus its data, and nothing
+// PDU is "Protocol Data Unit" — the function code plus its data, and nothing
 // else. It gets its own name because it is *transport-independent*. Modbus
 // predates TCP; it ran on RS-485 serial wire in 1979, and that version (Modbus
 // RTU) wraps the same PDU differently:
@@ -67,41 +66,36 @@ import type { VentilationUnit } from './unit.ts';
 // why this file treats the two differently everywhere below.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// **21001, not the 21002 the documentation gives.** The usual Modbus convention
+// 21001, not the 21002 the documentation gives. The usual Modbus convention
 // clash: documentation numbers registers from 1, the wire numbers them from 0.
 // This is not a bug and must not be "corrected".
 //
-// TEACHING: this single line is the highest-risk constant in the file. Every
-// other value here is checkable against the Modbus spec; this one is only
-// knowable by having tried it against the actual device, and this client has
-// driven the real unit with it.
+// The highest-risk constant in the file: every other value here is checkable
+// against the Modbus spec, this one only by having driven the real device.
 const FAN_SPEED_REGISTER = 21_001;
 
-// The unit stores percent times ten: 400 means 40%.
-//
-// TEACHING: Modbus registers hold integers only — there are no floats and no
-// units. A vendor wanting one decimal place multiplies by ten and expects you
-// to know. 50% travels as 500; reading 500 back means 50%.
+// The unit stores percent times ten: 400 means 40%. Modbus registers hold
+// integers only, so a vendor wanting one decimal place multiplies by ten and
+// expects you to know.
 const PERCENT_SCALE = 10;
 
-// TEACHING: the two function codes we use, from the Modbus spec.
 //   0x03 "read holding registers" — read N registers starting at an address
 //   0x06 "write single register"  — write one value to one address
 const READ_HOLDING_REGISTERS = 0x03;
 const WRITE_SINGLE_REGISTER = 0x06;
-// TEACHING: a device signals a refusal by setting the top bit of the function
-// code in its reply: 0x06 becomes 0x86. `code & 0x80` is how you detect it.
+// A device signals a refusal by setting the top bit of the function code in its
+// reply: 0x06 becomes 0x86.
 const EXCEPTION_FLAG = 0x80;
 // The MBAP header is fixed-width, so every field sits at a known byte. These
-// names are the diagram at the top of this file written down, and both the
-// building and the reading side go through them — a byte position should never
-// appear as a bare number at a call site.
+// names are the diagram above written down, and both the building and the
+// reading side go through them — a byte position should never appear as a bare
+// number at a call site.
 const TRANSACTION_ID_OFFSET = 0;
 const PROTOCOL_ID_OFFSET = 2;
 const MBAP_LENGTH_OFFSET = 4;
 const UNIT_ID_OFFSET = 6;
 
-// TEACHING: transaction id (2) + protocol id (2) + length (2) + unit id (1).
+// transaction id (2) + protocol id (2) + length (2) + unit id (1).
 const MBAP_HEADER_BYTES = 7;
 // Every MBAP field except the unit id is two bytes wide. Only this one needs a
 // name, because reassembly has to know where the length field ends.
@@ -119,40 +113,31 @@ const PDU_BODY_OFFSET = FUNCTION_CODE_OFFSET + 1;
 // Written on the way out, checked on the way in. Always zero over Modbus TCP,
 // which makes it a tripwire rather than information.
 const PROTOCOL_ID = 0;
-// One unit id plus the largest PDU Modbus allows.
+// One unit id plus the largest PDU Modbus allows. 254 = 1 + 253, and the 253 is
+// a fossil: a serial Modbus RTU frame could be at most 256 bytes, less the
+// address byte and the two CRC bytes. TCP has no such constraint, but the limit
+// was kept so that the same PDU stays valid on both transports.
 //
-// TEACHING: 254 = 1 + 253, and the 253 is a fossil. A serial Modbus RTU frame
-// could be at most 256 bytes; take off the address byte and the two CRC bytes
-// and the PDU has 253 left. TCP has no such constraint, but the limit was kept
-// so that the same PDU stays valid on both transports.
-//
-// So the bound below — the thing that stops a peer claiming 65535 bytes and
-// making us wait out the whole budget — is enforcing an RS-485 framing limit
-// from 1979 over a modern socket. Correct, and worth knowing where it came from.
+// It is also the bound that stops a peer claiming 65535 bytes and making us
+// wait out the whole budget for data that will never arrive.
 const MAX_MBAP_LENGTH = 254;
 
 /**
  * A raw byte stream, so the protocol can be tested without a socket. Chunk
  * boundaries are deliberately the caller's problem: TCP is free to split a
  * twelve-byte frame in half, and reassembling it is the part worth testing.
+ *
+ * The seam sits at the *byte* level rather than the frame level on purpose. A
+ * fake that handed back whole frames would never exercise reassembly, which is
+ * the most common bug in hand-written network clients: people assume one 'data'
+ * event equals one message, and it does not.
  */
-// TEACHING: this interface is the *seam* — the point where the code can be
-// swapped without editing anything that uses it. Everything above it is pure
-// protocol logic that can be tested with a fake three-method object; everything
-// below it (`openTcpStream`) is real socket plumbing tested against loopback.
-//
-// The seam is deliberately at the *byte* level rather than at the frame level.
-// A fake that handed back whole frames would never exercise reassembly, which
-// is the single most common bug in hand-written network clients: people assume
-// one 'data' event equals one message, and it does not.
 export interface ByteStream {
   send(bytes: Uint8Array): void;
   listen(onChunk: (chunk: Uint8Array) => void, onError: (error: Error) => void): void;
   close(): void;
 }
 
-// TEACHING: a function type, so tests can pass their own opener instead of the
-// real TCP one. The default is supplied in `createModbusUnit` below.
 export type OpenStream = (host: string, port: number, timeoutMs: number) => Promise<ByteStream>;
 
 export interface ModbusUnitOptions {
@@ -162,15 +147,10 @@ export interface ModbusUnitOptions {
   /** Covers connecting as well as waiting for the answer — see `openTcpStream`. */
   readonly timeout: Temporal.Duration;
   readonly retries: number;
-  /** Between attempts. Reconnecting the instant a device refused you is the
-   * least likely attempt to succeed, and four of those inside a millisecond is
-   * one attempt wearing a disguise. */
+  /** Between attempts. */
   readonly retryPause: Temporal.Duration;
 }
 
-// TEACHING: a factory function, not a class. It returns an object holding two
-// methods that close over `options` and the transaction counter. This is how the
-// project does "an object with private state" without `class` or `this`.
 export function createModbusUnit(
   options: ModbusUnitOptions,
   openStream: OpenStream = openTcpStream,
@@ -178,15 +158,13 @@ export function createModbusUnit(
   // The unit id is narrowed because its bad values fail *silently*:
   // Number("banana") is NaN, a Uint8Array coerces NaN to 0, and 0 is the Modbus
   // broadcast address — the unit would act on a write and never reply, so a
-  // command that landed would be reported as having failed.
+  // command that landed would be reported as having failed. (1-247 is the
+  // spec's range for addressable devices; 248-255 are reserved.)
   //
   // The host and port get no such guard, deliberately. A nonsense port fails
   // loudly on every attempt with the operating system's own message, which the
   // caller logs and recovers from; there is nothing silent to protect against,
   // and a guard per field would be ceremony rather than defence.
-  //
-  // TEACHING: 1–247 is the Modbus spec's range for addressable devices. 0 is
-  // "broadcast to everyone, nobody replies"; 248–255 are reserved.
   if (!Number.isInteger(options.unitId) || options.unitId < 1 || options.unitId > 247) {
     throw new Error(`unit id ${options.unitId} is not a Modbus slave address (1-247)`);
   }
@@ -201,16 +179,15 @@ export function createModbusUnit(
   // mistaken for the answer to this one.
   let lastTransactionId = 0;
 
-  // TEACHING: wraps at 65536 because the field is two bytes. Wrapping to 0 is
-  // fine — 0 is a legal transaction id, and each exchange uses a brand-new
-  // connection anyway, so two live requests can never share a socket.
+  // Wraps at 65536 because the field is two bytes. Wrapping to 0 is fine — 0 is
+  // a legal transaction id, and each exchange uses a brand-new connection
+  // anyway, so two live requests can never share a socket.
   const nextTransactionId = (): number => {
     lastTransactionId = (lastTransactionId + 1) % 0x1_0000;
     return lastTransactionId;
   };
 
-  // TEACHING: ONE attempt. Connect, send, wait for a frame, close. The retry
-  // logic lives one level up in `ask`.
+  // One attempt: connect, send, wait for a frame, close. Retries live in `ask`.
   const exchange = async (request: Uint8Array): Promise<Uint8Array> => {
     // A fresh connection per request. At two requests every thirty seconds a
     // persistent socket is state to manage — stale connections, reconnection,
@@ -221,9 +198,9 @@ export function createModbusUnit(
     // "five second" attempt take ten, and enough of those overrun the thirty
     // second cycle they are supposed to fit inside.
     //
-    // TEACHING: `performance.now()` rather than `Date.now()` because it is
-    // monotonic — it cannot jump backwards when the machine syncs its clock,
-    // which would otherwise make `remaining` nonsense.
+    // performance.now() rather than Date.now() because it is monotonic: it
+    // cannot jump backwards when the machine syncs its clock, which would
+    // otherwise make `remaining` nonsense.
     const startedAt = performance.now();
     const stream = await openStream(options.host, options.port, timeoutMs);
 
@@ -235,21 +212,18 @@ export function createModbusUnit(
 
       return await sendAndWait(stream, request, remaining);
     } finally {
-      // TEACHING: `finally` runs on every exit — success, timeout, malformed
-      // frame, or the throw just above. This one line is what stops the process
-      // leaking a socket per failed attempt, forever. A test counts opens
-      // against closes precisely because deleting it breaks nothing visibly.
+      // What stops the process leaking a socket per failed attempt, forever. A
+      // test counts opens against closes precisely because deleting this line
+      // breaks nothing visibly.
       stream.close();
     }
   };
 
-  // TEACHING: the retry policy. Note what it retries and what it does not —
-  // that distinction is the interesting part of this function.
   const ask = async (request: Uint8Array, expectedCode: number): Promise<Uint8Array> => {
     let lastFailure: Error | undefined;
 
-    // TEACHING: `retries: 1` means TWO attempts (0 and 1). Off-by-one worth
-    // knowing when reading main.ts's timing arithmetic.
+    // `retries: 1` means TWO attempts (0 and 1) — worth knowing when reading
+    // main.ts's timing arithmetic.
     for (let attempt = 0; attempt <= options.retries; attempt += 1) {
       let response: Uint8Array;
 
@@ -257,11 +231,8 @@ export function createModbusUnit(
         response = await exchange(request);
       } catch (error) {
         // Network trouble: a refused connection, a timeout, a dropped socket.
-        // Worth another go, after a pause.
-        //
-        // TEACHING: the `catch` only wraps `exchange`, so only *transport*
-        // failures land here. Everything after this block is a frame we
-        // actually received, and it is deliberately outside the try.
+        // Worth another go, after a pause. The catch wraps only `exchange`, so
+        // only *transport* failures land here.
         lastFailure = error instanceof Error ? error : new Error(String(error));
         if (attempt < options.retries) await pause(retryPauseMs);
         continue;
@@ -279,34 +250,32 @@ export function createModbusUnit(
       return readAnswer(response, request, expectedCode, options.unitId);
     }
 
-    // TEACHING: reachable only if the loop never ran, which needs a negative
-    // `retries`. The `??` keeps the type honest rather than asserting.
+    // Reachable only if the loop never ran, which needs a negative `retries`.
     throw lastFailure ?? new Error('the unit was never asked');
   };
 
   return {
     async read() {
-      // TEACHING: FC3 asks "give me N registers starting at address A", so the
-      // PDU is [function code, address hi, address lo, count hi, count lo].
-      // We want exactly one register, hence `toBigEndianBytes(1)`.
+      // FC3 asks "give me N registers starting at address A", so the PDU is
+      // [function code, address hi, address lo, count hi, count lo].
       const request = buildFrame(nextTransactionId(), options.unitId, [
         READ_HOLDING_REGISTERS,
         ...toBigEndianBytes(FAN_SPEED_REGISTER),
         ...toBigEndianBytes(1),
       ]);
 
-      // TEACHING: `body` is everything after the function code. For FC3 that is
-      // [byte count, value hi, value lo] — so a healthy answer is 3 bytes with
-      // a count of 2. Checking both guards a truncated frame and a device that
-      // answered about a different number of registers than we asked for.
+      // For FC3 the body is [byte count, value hi, value lo], so a healthy
+      // answer is 3 bytes with a count of 2. Checking both guards a truncated
+      // frame and a device that answered about a different number of registers
+      // than we asked for.
       const body = await ask(request, READ_HOLDING_REGISTERS);
       if (body.length < 3 || body[0] !== 2) {
         throw new Error(`expected one register back, the unit sent a ${body.length}-byte body`);
       }
 
-      // TEACHING: offset 1 skips the byte count. 500 / 10 = 50, and `toLevel`
-      // then checks 50 is one of the nine levels the unit can actually be at —
-      // so a register holding 555 (55.5%) becomes an error rather than a lie.
+      // Offset 1 skips the byte count. `toLevel` then checks the result is one
+      // of the nine levels the unit can actually be at, so a register holding
+      // 555 (55.5%) becomes an error rather than a lie.
       const raw = readBigEndianUint16(body, 1);
       const level = toLevel(raw / PERCENT_SCALE);
       if (level === undefined) {
@@ -319,9 +288,9 @@ export function createModbusUnit(
     async set(level: CommandedLevel) {
       const value = level * PERCENT_SCALE;
 
-      // TEACHING: FC6 is [function code, address hi, address lo, value hi,
-      // value lo] — same shape as the read request, different meaning for the
-      // last two bytes.
+      // FC6 is [function code, address hi, address lo, value hi, value lo] —
+      // the same shape as the read request, a different meaning for the last
+      // two bytes.
       const request = buildFrame(nextTransactionId(), options.unitId, [
         WRITE_SINGLE_REGISTER,
         ...toBigEndianBytes(FAN_SPEED_REGISTER),
@@ -330,10 +299,8 @@ export function createModbusUnit(
 
       // FC6 echoes back the register and the value it wrote. A disagreeing echo
       // means something else is on the wire, and reporting success would leave
-      // the caller believing a level the unit never took.
-      //
-      // TEACHING: for FC6 the body is [reg hi, reg lo, value hi, value lo] —
-      // four bytes, no byte count. Hence the different length check from read().
+      // the caller believing a level the unit never took. The body here is
+      // [reg hi, reg lo, value hi, value lo] — four bytes, no byte count.
       const body = await ask(request, WRITE_SINGLE_REGISTER);
       if (body.length < 4) {
         throw new Error(`expected the register and value echoed back, the unit sent a ${body.length}-byte body`);
@@ -351,27 +318,19 @@ export function createModbusUnit(
   };
 }
 
-// MBAP header then PDU: transaction id, protocol id (always zero over TCP), the
-// length of everything after this field, unit id.
-//
-// TEACHING: assembles the diagram at the top of this file. `Uint8Array` is a
-// fixed-length array of bytes; `.set(source, offset)` copies bytes into it at a
-// position. The frame is allocated at exactly the right size up front, so every
-// write below lands in already-reserved space.
-//
-// Note the split of responsibilities: callers build the PDU — the command
-// itself, which would be identical over serial — and this function adds only the
-// TCP-specific wrapper around it.
+// MBAP header then PDU. Note the split of responsibilities: callers build the
+// PDU — the command itself, which would be identical over serial — and this
+// function adds only the TCP-specific wrapper around it.
 function buildFrame(transactionId: number, unitId: number, pdu: readonly number[]): Uint8Array {
   const frame = new Uint8Array(MBAP_HEADER_BYTES + pdu.length);
 
   frame.set(toBigEndianBytes(transactionId), TRANSACTION_ID_OFFSET);
   frame.set(toBigEndianBytes(PROTOCOL_ID), PROTOCOL_ID_OFFSET);
-  // TEACHING: the length field counts what FOLLOWS it — the unit id (1 byte)
-  // plus the PDU. Hence `+ 1`. Forgetting it is the classic Modbus bug, because
-  // "length" reads as the PDU's length and the unit id being counted is the
-  // surprise: declare the PDU alone and the device consumes a PDU one byte
-  // short, leaving our last byte to be read as the start of the next frame.
+  // The length field counts what FOLLOWS it — the unit id (1 byte) plus the
+  // PDU. Hence `+ 1`. Forgetting it is the classic Modbus bug, because "length"
+  // reads as the PDU's length and the unit id being counted is the surprise:
+  // declare the PDU alone and the device consumes a PDU one byte short, leaving
+  // our last byte to be read as the start of the next frame.
   frame.set(toBigEndianBytes(pdu.length + 1), MBAP_LENGTH_OFFSET);
   frame[UNIT_ID_OFFSET] = unitId;
   frame.set(pdu, MBAP_HEADER_BYTES);
@@ -380,9 +339,9 @@ function buildFrame(transactionId: number, unitId: number, pdu: readonly number[
 }
 
 /** The PDU body after the function code, having checked everything before it. */
-// TEACHING: five checks, in order, each rejecting a different way the answer
-// could be wrong. They run before any data is trusted, and every one of them
-// has a test. Read this as "what could a reply be, other than our reply?"
+// Five checks, in order, each rejecting a different way the answer could be
+// wrong. They run before any data is trusted, and every one of them has a test.
+// Read this as "what could a reply be, other than our reply?"
 function readAnswer(
   response: Uint8Array,
   request: Uint8Array,
@@ -403,8 +362,8 @@ function readAnswer(
     throw new Error(`answer to transaction ${answered}, but we asked ${asked}`);
   }
 
-  // The one header field that carried no check. It is always zero over TCP, so
-  // anything else means this is not a Modbus TCP frame at all.
+  // (3) Always zero over TCP, so anything else means this is not a Modbus TCP
+  // frame at all.
   const protocol = readBigEndianUint16(response, PROTOCOL_ID_OFFSET);
   if (protocol !== PROTOCOL_ID) {
     throw new Error(`answer carries protocol id ${protocol}, but Modbus TCP is always 0`);
@@ -415,15 +374,15 @@ function readAnswer(
     throw new Error(`answer from unit ${String(response[UNIT_ID_OFFSET])}, but we asked unit ${unitId}`);
   }
 
-  // TEACHING: indexing a Uint8Array can yield `undefined` under this project's
-  // `noUncheckedIndexedAccess` setting, so it has to be handled rather than
-  // assumed. In practice check (1) already guarantees this byte exists.
+  // Indexing a Uint8Array can yield `undefined` under this project's
+  // `noUncheckedIndexedAccess`, so it has to be handled rather than assumed. In
+  // practice check (1) already guarantees this byte exists.
   const code = response[FUNCTION_CODE_OFFSET];
   if (code === undefined) throw new Error('the unit sent a frame with no function code');
 
-  // TEACHING: (5a) the refusal case. The device set the top bit of the function
-  // code and appended one byte saying why (2 = "bad address", 3 = "bad value",
-  // and so on). This is the device *talking*, so it must not be retried.
+  // (5a) The refusal case. The device set the top bit of the function code and
+  // appended one byte saying why (2 = "bad address", 3 = "bad value", and so
+  // on). This is the device *talking*, so it must not be retried.
   if ((code & EXCEPTION_FLAG) !== 0) {
     const reason = response[PDU_BODY_OFFSET] ?? 0;
     throw new Error(`the unit refused the request with Modbus exception ${reason}`);
@@ -436,24 +395,22 @@ function readAnswer(
     throw new Error(`the unit answered function ${code}, but we asked ${expectedCode}`);
   }
 
-  // TEACHING: hand back only the part the caller cares about — everything after
-  // the function code. `slice` copies; `subarray` would return a view onto the
-  // same memory, which is a subtle way to leak a buffer.
+  // `slice` copies; `subarray` would return a view onto the same memory, which
+  // is a subtle way to leak a buffer.
   return response.slice(PDU_BODY_OFFSET);
 }
 
-// TEACHING: the request/response cycle over one already-open stream. Wrapped in
-// a Promise because the answer arrives later, in a callback, and the caller
-// wants to `await` it. The three ways this settles are: a complete frame
-// (resolve), the timer firing (reject), or the stream erroring (reject).
+// The request/response cycle over one already-open stream. The three ways this
+// settles are: a complete frame (resolve), the timer firing (reject), or the
+// stream erroring (reject).
 function sendAndWait(
   stream: ByteStream,
   request: Uint8Array,
   timeoutMs: number,
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
-    // TEACHING: the accumulator. TCP hands us arbitrary chunks, so bytes pile up
-    // here until they form a whole frame.
+    // TCP hands us arbitrary chunks, so bytes pile up here until they form a
+    // whole frame.
     let received: Uint8Array = new Uint8Array(0);
 
     const timer = setTimeout(() => {
@@ -466,22 +423,21 @@ function sendAndWait(
 
         try {
           const frame = completeFrame(received);
-          // TEACHING: `undefined` means "not all here yet" — a partial frame is
-          // normal, not an error, so simply return and wait for more bytes.
+          // `undefined` means "not all here yet" — a partial frame is normal,
+          // not an error, so simply wait for more bytes.
           if (frame === undefined) return;
 
-          // TEACHING: clearing the timer matters. A fired timer on a settled
-          // promise is harmless, but leaving it armed keeps the process alive.
+          // A fired timer on a settled promise is harmless, but leaving one
+          // armed keeps the process alive.
           clearTimeout(timer);
           resolve(frame);
         } catch (error) {
           // A malformed length claim is the peer answering badly, not silence.
-          // Escaping this handler would put it on the socket instead.
           //
-          // TEACHING: this handler is called by the socket's 'data' event. A
-          // throw here does not travel to the caller of `sendAndWait` — there is
-          // no call stack connecting them — it becomes an uncaught exception.
-          // Catching and rejecting is what routes it back to the awaiting code.
+          // This handler is called by the socket's 'data' event, so a throw here
+          // does not travel to the caller of `sendAndWait` — there is no call
+          // stack connecting them — it becomes an uncaught exception. Catching
+          // and rejecting is what routes it back to the awaiting code.
           clearTimeout(timer);
           reject(error instanceof Error ? error : new Error(String(error)));
         }
@@ -492,7 +448,7 @@ function sendAndWait(
       },
     );
 
-    // TEACHING: listeners registered BEFORE sending, so an answer that arrives
+    // Listeners registered BEFORE sending, so an answer that arrives
     // immediately cannot be missed. Ordering here is not cosmetic.
     stream.send(request);
   });
@@ -506,8 +462,8 @@ function sendAndWait(
 // of 65535 means waiting out the whole budget for bytes that will never arrive,
 // while buffering whatever does — and then retrying the same garbage.
 function completeFrame(received: Uint8Array): Uint8Array | undefined {
-  // TEACHING: we cannot even read the length field until the bytes it occupies
-  // have arrived — bytes 4 and 5, so six in all.
+  // The length field occupies bytes 4 and 5, so six bytes must have arrived
+  // before it can be read at all.
   const bytesThroughLengthField = MBAP_LENGTH_OFFSET + MBAP_LENGTH_BYTES;
   if (received.length < bytesThroughLengthField) return undefined;
 
@@ -516,18 +472,16 @@ function completeFrame(received: Uint8Array): Uint8Array | undefined {
     throw new Error(`the answer declares ${declared} bytes, more than a Modbus frame can hold`);
   }
 
-  // TEACHING: the length field counts bytes after itself, so the total frame
-  // size is everything through that field plus whatever it declares.
+  // The length field counts bytes after itself, so the total frame size is
+  // everything through that field plus whatever it declares.
   const total = bytesThroughLengthField + declared;
-  // TEACHING: anything beyond `total` is left alone. On a one-request connection
-  // there should be nothing, and if there is, it is not ours to interpret.
+  // Anything beyond `total` is left alone. On a one-request connection there
+  // should be nothing, and if there is, it is not ours to interpret.
   return received.length < total ? undefined : received.slice(0, total);
 }
 
-// TEACHING: split a number into two bytes, most significant first.
-//   21001 = 0x5209 → [0x52, 0x09]
-//   `>> 8` shifts the high byte down into position; `& 0xff` keeps only the
-//   lowest eight bits, discarding anything above.
+// Split a number into two bytes, most significant first: 21001 = 0x5209 becomes
+// [0x52, 0x09].
 //
 // A tuple rather than `number[]` because the arity is load-bearing and nothing
 // else states it: every offset in `buildFrame` is spaced two bytes apart
@@ -539,8 +493,7 @@ function toBigEndianBytes(value: number): readonly [number, number] {
   return [(value >> 8) & 0xff, value & 0xff];
 }
 
-// TEACHING: the other direction — the two bytes at `offset` back into a number.
-//   [0x01, 0xf4] → (0x01 << 8) | 0xf4 = 256 + 244 = 500
+// The other direction: the two bytes at `offset` back into a number.
 //
 // Not a strict mirror of the above, which is why the names are not a matched
 // pair either: this reads a two-byte window out of a whole frame rather than
@@ -557,8 +510,8 @@ function readBigEndianUint16(bytes: Uint8Array, offset: number): number {
   return (high << 8) | low;
 }
 
-// TEACHING: Uint8Array has no `concat`, so joining means allocating a new array
-// and copying both halves in. Fine at these sizes — frames are twelve bytes.
+// Frames are twelve bytes, so allocating and copying on every join costs
+// nothing worth avoiding.
 function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
   const joined = new Uint8Array(left.length + right.length);
   joined.set(left, 0);
@@ -566,18 +519,15 @@ function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
   return joined;
 }
 
-// TEACHING: `await pause(250)` — the idiomatic way to sleep in async code.
 function pause(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-// TEACHING: the only function in this file that touches a real socket, and the
-// default value of the `openStream` parameter at the top. Everything above is
-// testable without it; this is tested against a loopback server.
+// The only function here that touches a real socket, and the default value of
+// the `openStream` parameter above. Everything else is testable without it;
+// this is tested against a loopback server.
 function openTcpStream(host: string, port: number, timeoutMs: number): Promise<ByteStream> {
   return new Promise((resolve, reject) => {
-    // TEACHING: `connect` returns immediately with a socket that is not yet
-    // connected. The 'connect' event below is when it actually becomes usable.
     const socket = connect({ host, port });
 
     // Connecting has to sit inside the budget. Left to the operating system, an
@@ -589,18 +539,16 @@ function openTcpStream(host: string, port: number, timeoutMs: number): Promise<B
     // timeout at all" — so a misconfigured budget would hang here forever rather
     // than failing immediately, which is the failure this exists to prevent.
     //
-    // TEACHING: `destroy(error)` tears the socket down AND emits that error,
-    // which the listener below turns into a rejection. One mechanism, not two.
+    // `destroy(error)` tears the socket down AND emits that error, which the
+    // listener below turns into a rejection. One mechanism, not two.
     const connectTimer = setTimeout(() => {
       socket.destroy(new Error(`no connection to ${host}:${port} within ${timeoutMs} ms`));
     }, timeoutMs);
 
     // Deliberately left attached after the promise settles. Rejecting a settled
     // promise is a no-op, and it means the socket is never for one instant
-    // without an error listener — which is what Node turns into a crash.
-    //
-    // TEACHING: that last clause is a real Node behaviour, not caution. An
-    // 'error' event with no listener does not throw — it terminates the process.
+    // without an error listener — which Node turns into process termination
+    // rather than a catchable throw.
     socket.once('error', (error) => {
       clearTimeout(connectTimer);
       reject(error);
@@ -609,13 +557,9 @@ function openTcpStream(host: string, port: number, timeoutMs: number): Promise<B
     socket.once('connect', () => {
       clearTimeout(connectTimer);
 
-      // TEACHING: the socket is only wrapped in a `ByteStream` once it is
-      // actually connected, so nothing above this line can be handed a socket
-      // that is still dialling.
+      // Wrapped only once actually connected, so nothing above this line can be
+      // handed a socket that is still dialling.
       resolve({
-        // TEACHING: `void` discards `write`'s return value (a backpressure hint
-        // that is meaningless for a single twelve-byte write) and satisfies the
-        // interface's `void` return type.
         send: (bytes) => void socket.write(bytes),
         listen: (onChunk, onError) => {
           socket.on('data', onChunk);

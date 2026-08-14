@@ -6,11 +6,9 @@ import type { Reading } from '../domain/measurement.ts';
  * protocol logic testable against canned responses, and only main.ts ever passes
  * the real thing — exactly as `OpenStream` works in the Modbus client.
  *
- * It lives here, beside the source interface, because it belongs to no vendor.
- * It was declared in `netatmo.ts` until 2026-08-14, which made the Tado adapter
- * import the Netatmo one for a type alias — a dependency between two providers
- * that share nothing, and the sort of line a reader stops on for the wrong
- * reason.
+ * It lives here, beside the source interface, because it belongs to no vendor:
+ * declared inside either adapter, the other would have to import that vendor's
+ * module for a type alias.
  */
 export type FetchLike = typeof fetch;
 

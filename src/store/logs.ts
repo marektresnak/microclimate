@@ -7,12 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
  *
  * The second table in the file, and append-only like the first — a log line is
  * a fact about a point in time, so the database keeps its no-mutable-row
- * property untouched. There is no severity
- * column: the lines carry no level today, and a taxonomy invented for a few
- * hundred lines a day serves no consumer — a time range and an eye find
- * everything. Nothing prunes, same as the readings; tens of megabytes a year
- * at current volume, and the easiest retention target there is when that day
- * comes — a DELETE below a cutoff, no rollup needed.
+ * property untouched. No severity column and no pruning; see CLAUDE.md, "The
+ * service log".
  *
  * Exported so the tests assert against the real schema rather than a copy of it.
  */

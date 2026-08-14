@@ -16,10 +16,6 @@ import type { FetchLike, SensorSource } from './source.ts';
  * so the device flow is not one option among several; it is what is left.
  *
  * We read and never write. Heating stays entirely with Tado.
- *
- * `fetchImpl` is the seam, exactly as in netatmo.ts and as `OpenStream` is in
- * the Modbus client: everything above it is protocol logic tested against canned
- * responses, and only main.ts ever passes the real `fetch`.
  */
 
 // Exported because /auth/tado swaps its device code against the same endpoint.
@@ -38,24 +34,10 @@ const API_URL = 'https://my.tado.com/api/v2';
 // and the same reason as the Netatmo adapter's.
 const REQUEST_TIMEOUT = Temporal.Duration.from({ seconds: 10 });
 
-// How Tado says a bearer token is no good: a plain 401. All three variants were
-// measured against the live API on 2026-08-14 —
-//
-//   absent or garbage token: {"errors":[{"code":"unauthorized",
-//                             "title":"Full authentication is required to access this resource"}]}
-//   token held past its 10 minutes: {"errors":[{"code":"unauthorized",
-//                             "title":"access token is expired"}]}
-//
-// — which is why the status alone decides and no body is read: every variant
-// means the same thing and a fresh token is the only fix. The one that matters is
-// the third, because it arrives every ten minutes forever; it was captured by
-// holding a token for eleven and asking again. A permission refusal rides 403 and
-// is reported as itself.
-//
-// Measured rather than assumed on purpose. The Netatmo adapter inferred its
-// refusal shape from how OAuth APIs usually behave, its test pinned the guess,
-// and the suite stayed green while the refresh path could not fire against the
-// real API at all.
+// How Tado says a bearer token is no good: a plain 401, in all three variants —
+// absent, garbage, and held past its ten minutes. The status alone decides and
+// no body is read, because every variant means the same thing and a fresh token
+// is the only fix. A permission refusal rides 403 and is reported as itself.
 const REJECTED_TOKEN_STATUS = 401;
 
 // A valve measures every minute, but the published value only moves when a
@@ -68,10 +50,8 @@ const POLL_INTERVAL = Temporal.Duration.from({ minutes: 1 });
 /**
  * Tado's identity here, which is only where its token lives: the device flow has
  * no client secret and the client id above is public. Built once in main.ts and
- * handed whole to both consumers — this adapter and the /auth/tado onboarding
- * route — so the two cannot disagree about which file holds the credential. An
- * onboarding that saved the token where the poller does not read would be a
- * lockout wearing a success page.
+ * handed whole to this adapter and to /auth/tado, so the two cannot disagree
+ * about which file holds the credential.
  *
  * Its presence is also Tado's on-switch: with no TADO_TOKEN_PATH set there is
  * nothing to poll and nothing to authorise. See main.ts.
@@ -98,9 +78,8 @@ export interface TadoOptions {
 export function createTadoSource(options: TadoOptions, fetchImpl: FetchLike = fetch): SensorSource {
   // Access tokens live ten minutes, so refreshing is the hot path here — every
   // tenth poll or so, where the Netatmo adapter refreshes every few hours.
-  // Expiry is still discovered from the refusal rather than tracked against a
-  // clock: that path has to exist anyway, and a timer doing the same job would
-  // be a second mechanism to keep in agreement with it.
+  // Expiry is discovered from the refusal rather than tracked against a clock;
+  // see CLAUDE.md, "Configuration".
   let accessToken: string | undefined;
 
   // The home id and the zone list only change when someone rearranges the
@@ -244,20 +223,18 @@ export function createTadoSource(options: TadoOptions, fetchImpl: FetchLike = fe
 /**
  * One zone's contribution to a poll — which is allowed to be nothing.
  *
- * That empty array is the whole of how a multi-zone answer degrades, and it is
- * **silent on purpose**. What the vendor *declares* absent — a zone missing from
- * the answer, a valve that is not connected, a zone with no sensors — costs that
- * zone its readings and nothing else; the other zones land, and the honest report
- * of the gap is `/api/state` turning that room stale against its own freshness
- * window, which is exactly what the window is for. A line per skipped zone per
- * poll would be 1,440 a day for one flat battery, and it would say nothing the
- * state endpoint does not already say better. The one skip that is *our* mistake
- * rather than the vendor's — a zone id that is not in the account — is logged
- * once at discovery, with the whole zone list beside it.
+ * That empty array is how a multi-zone answer degrades, and it is **silent on
+ * purpose**. What the vendor declares absent — a zone missing from the answer, a
+ * zone with no sensors — costs that zone its readings and nothing else; the
+ * others land, and the report of the gap is `/api/state` turning that room stale
+ * against its own freshness window. A line per skipped zone per poll would be
+ * 1,440 a day for one flat battery. The one skip that is *our* mistake rather
+ * than the vendor's — a zone id the account does not have — is logged once at
+ * discovery with the whole zone list beside it.
  *
- * What fails to narrow throws the poll away instead, because a payload we cannot
- * read might mean we are misreading the API, and storing the zones that happened
- * to parse would mask that.
+ * What fails to narrow throws the poll away instead: a payload we cannot read
+ * might mean we are misreading the API, and storing the zones that happened to
+ * parse would mask that.
  */
 function zoneReadingsOf(
   state: unknown,
@@ -273,19 +250,13 @@ function zoneReadingsOf(
     throw new Error(`${where} has a state that is not an object`);
   }
 
-  // `link.state` is deliberately NOT read, and this is a measured decision
-  // rather than an omission. It is the vendor's own opinion about whether the
-  // valve is reachable — a second freshness mechanism beside the one this project
-  // already has, and the weaker of the two: every datapoint carries the instant
-  // Tado stamped it, and a valve that has stopped reporting keeps re-publishing
-  // that same ageing instant until the per-source window calls the room stale.
-  //
-  // Reading the field as well would mean knowing its whole vocabulary, and the
-  // first guess at it — `CONNECTED` — was wrong. The real answer is `ONLINE`,
-  // measured on 2026-08-14, and the wrong guess silently dropped every reading in
-  // the flat until the payload was dumped and looked at. Two switches answering
-  // one question is one too many; this is the same argument that took `isActive`
-  // out of precedence.ts.
+  // `link.state` is deliberately NOT read. It is the vendor's second opinion
+  // about freshness, beside the one this project already has and the weaker of
+  // the two: every datapoint carries the instant Tado stamped it, and a valve
+  // that stops reporting keeps re-publishing that ageing instant until the
+  // per-source window calls the room stale. Reading the field as well would mean
+  // knowing its whole vocabulary and would be a second switch answering one
+  // question — the same argument that keeps `isActive` out of precedence.ts.
   const sensors = 'sensorDataPoints' in state ? state.sensorDataPoints : undefined;
   // A zone that measures nothing — hot water is the one in this account.
   if (sensors === undefined || sensors === null) return [];
@@ -293,21 +264,17 @@ function zoneReadingsOf(
     throw new Error(`${where} has sensorDataPoints that are not an object`);
   }
 
-  // Each datapoint keeps the timestamp it arrived with. In the answer measured on
-  // 2026-08-14 all three zones stamped temperature and humidity with the same
-  // instant, so this is not two clocks in practice today — but they are two
-  // fields, and letting one speak for the other would be inventing a rule the
-  // payload does not state. Between zones the stamps genuinely differ (07:41,
-  // 07:46 and 07:52 in one answer), which is what the freshness window is sized
-  // for. °C and %RH are already the canonical units, so no value converts.
+  // Each datapoint keeps the timestamp it arrived with. Temperature and humidity
+  // share one stamp within a zone in practice, but they are two fields, and
+  // letting one speak for the other would invent a rule the payload does not
+  // state. °C and %RH are already the canonical units, so no value converts.
   //
   // A re-publication is not a duplicate: when a zone speaks again its datapoints
   // carry a new timestamp, so the row is genuinely new even if the value barely
-  // moved. And because each zone keeps its own schedule, the normal collector line
-  // for this source is a partial one — "6 readings, 2 new" was the second real
-  // poll, one zone having re-published while the other two repeated themselves and
-  // were absorbed by the uniqueness constraint. Netatmo, one device on one
-  // schedule, reads "3 readings, 0 new" instead. Both are the dedup working.
+  // moved. Because each zone keeps its own schedule, the normal collector line
+  // for this source is a partial one — "6 readings, 2 new" — where Netatmo, one
+  // device on one schedule, reads "3 readings, 0 new". Both are the dedup
+  // working.
   const readings: Reading[] = [];
 
   if ('insideTemperature' in sensors) {
@@ -350,8 +317,7 @@ async function payloadOf(response: Response, path: string): Promise<unknown> {
  * Tado's token answer. Unlike Netatmo's, `refresh_token` is required rather than
  * optional: Tado's rotation revokes the token we sent the instant the new one is
  * issued, so an answer without a replacement means the credential is gone and
- * nothing took its place. That is a lockout to shout about, not a field to
- * shrug at.
+ * nothing took its place.
  *
  * Exported because /auth/tado reads the same answer, from the device-code grant
  * — one narrowing so the two halves cannot disagree about what a Tado grant is.
@@ -450,11 +416,6 @@ function zoneOf(payload: unknown): DiscoveredZone {
 /**
  * The bulk endpoint's envelope: `{ zoneStates: { "1": {…}, "2": {…} } }`, keyed
  * by zone id written as a string.
- *
- * This is the one shape here that has not been spoken to the real API — the
- * reference client reads each zone on its own. If it turns out to differ, the
- * fallback is one verified `GET /homes/{id}/zones/{zoneId}/state` per zone,
- * which costs a request per room and changes nothing else.
  */
 function zoneStatesOf(payload: unknown): Record<string, unknown> {
   if (payload === null || typeof payload !== 'object' || !('zoneStates' in payload)) {
@@ -476,7 +437,7 @@ function zoneStatesOf(payload: unknown): Record<string, unknown> {
 
 /** `zoneStates` is the one payload read by a computed key rather than a literal
  * one, which is all this says. Every value in it is still `unknown` and goes
- * through `zoneOutcome`. */
+ * through `zoneReadingsOf`. */
 function isKeyedObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
 }

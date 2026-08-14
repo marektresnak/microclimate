@@ -21,11 +21,9 @@ export interface SensorConfig {
 
   // Descriptive, and reported by /api/sensors so a client can tell a retired
   // instrument from a live one. It does *not* decide whether the instrument is
-  // consulted — the precedence lists below are the only thing that does.
-  //
-  // Two switches for one question is one too many, and this was the weaker of
-  // the two: the ranked list also says in what *order*, so it has to be edited
-  // anyway. A test asserts the two never disagree.
+  // consulted — the precedence lists below are the only thing that does, because
+  // the ranked list also says in what *order* and has to be edited anyway. A
+  // test asserts the two never disagree.
   readonly isActive: boolean;
   // Per-source, never global. This is load-bearing: a 20-minute-old Tado
   // reading is healthy (that is its heartbeat) while a Netatmo silent for 20
@@ -41,10 +39,6 @@ export interface SensorConfig {
 // moment we fetch it, plus up to one 1-minute poll interval older before we
 // ask again: the window has to exceed 21 minutes or a healthy instrument
 // periodically reads as stale through our own polling. Twenty-five gives slack.
-//
-// This said 90 seconds until the Tado adapter was built ("one missed poll is
-// tolerated, two is not"), which assumed a poll produces a fresh value. It does
-// not, and the number was never measured against the vendor.
 const TADO_FRESHNESS = Temporal.Duration.from({ minutes: 25 });
 // Netatmo refreshes on their side every 7-8 minutes, so this has to cover two
 // of those before we call the instrument dead. Polling faster gains nothing.
@@ -60,11 +54,7 @@ export const SENSORS = {
   // Two radiators and two valves, but one Tado *zone* — and a zone reports one
   // measurement, from whichever device Tado designates. Per-valve readings do
   // not exist in the API, so the readable instrument is the zone and this is one
-  // sensor to us. The pair of ids this used to declare (`_left`, `_right`) was
-  // written before that was known and never carried a reading from real
-  // hardware, so they are gone rather than retired: the convention that keeps
-  // ids forever exists to keep historical readings interpretable, and there are
-  // none to keep.
+  // sensor to us.
   kids_room_tado: {
     room: 'kids_room',
     kinds: ['temperature', 'humidity'],
@@ -129,12 +119,11 @@ export const PRECEDENCE: Record<RoomId, Partial<Record<MeasurementKind, readonly
  * the rest of it: a mistyped sourceId is a compile error, and git records why an
  * assignment changed in a way a database row never could.
  *
- * The ids are the real account's, read from `GET /homes/1819708/zones` on
- * 2026-08-14. They are facts about the account rather than about this code, which
- * is why they are not consecutive and why the first guess at them (1, 2, 3) was
- * wrong in every entry. Two things corroborate the mapping beyond the Czech
- * names: Pokojík is the only zone with two valves in it, which is the kids' room
- * and its two radiators, and Ložnice reads 25.6 °C against the Home Coach's 25.7
+ * The ids are the real account's, read from `GET /homes/1819708/zones`. They are
+ * facts about the account rather than about this code, which is why they are not
+ * consecutive. Two things corroborate the mapping beyond the Czech names:
+ * Pokojík is the only zone with two valves in it, which is the kids' room and
+ * its two radiators, and Ložnice reads 25.6 °C against the Home Coach's 25.7
  * standing in the same room.
  *
  * If an id ever stops matching, the adapter says so at its first poll and lists

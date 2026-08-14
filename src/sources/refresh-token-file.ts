@@ -14,9 +14,8 @@ import { dirname } from 'node:path';
  *
  * Shared by each adapter (reads it before every refresh, writes the rotation)
  * and each onboarding route (writes the first token), which is why it is its own
- * module rather than living inside either. It was `netatmo-token.ts` until
- * 2026-08-14; Tado needed the identical thing, down to the corrupt-file rule, so
- * the module lost the vendor from its name rather than gaining a copy.
+ * module rather than living inside either — both vendors need the identical
+ * thing, down to the corrupt-file rule.
  */
 
 export function loadRefreshToken(path: string): string | undefined {

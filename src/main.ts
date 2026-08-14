@@ -32,7 +32,10 @@ import { openReadingStore } from './store/readings.ts';
 // retry, because the collector comes back around in thirty seconds anyway.
 const MODBUS_TIMEOUT = Temporal.Duration.from({ seconds: 5 });
 const MODBUS_RETRIES = 1;
-// Long enough that a retry is a second try rather than the same one repeated.
+// Reconnecting the instant a device refuses you is the least likely attempt to
+// succeed. A quarter second is long enough to be a genuine second try, and
+// small enough beside the five-second attempt it follows that the caller on the
+// other end of the API does not notice it.
 const MODBUS_RETRY_PAUSE = Temporal.Duration.from({ milliseconds: 250 });
 
 // How often sources are OFFERED a poll, not how often they are polled — each
@@ -105,8 +108,7 @@ const netatmoSettings: NetatmoSettings | undefined =
 // secret, so there is no credential in the environment to key on. Keyed on the
 // variable rather than on whether the file exists, deliberately — a lost token
 // file has to fail loudly at every poll and point at /auth/tado, not quietly
-// unconfigure the vendor and leave the valves looking like they were never asked
-// for.
+// unconfigure the vendor.
 const tadoTokenPath = envOrUndefined('TADO_TOKEN_PATH');
 const tadoSettings: TadoSettings | undefined =
   tadoTokenPath === undefined ? undefined : { tokenPath: tadoTokenPath };
@@ -115,10 +117,7 @@ const tadoSettings: TadoSettings | undefined =
 // configured the Tado rooms simply go quiet, which is the honest answer and the
 // one /api/state already knows how to give. With neither configured the list is
 // empty and the service collects nothing of its own — it still serves, and
-// still accepts whatever a push node sends it. Nothing stands in: a source that
-// invented readings would write them under the real instruments' ids, and the
-// record of real air this phase exists to gather has to be real or it is
-// worthless.
+// still accepts whatever a push node sends it.
 function chooseSources(): readonly SensorSource[] {
   const configured: SensorSource[] = [];
 
