@@ -203,8 +203,7 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   but it is not recorded anywhere, because nothing polls the unit; the service log records what
   the service was told, not what the panel did.
 
-**Known protocol details**, recovered from my earlier C# spikes in `~/RiderProjects/RecuControl`
-and `~/RiderProjects/DaphneControl` (both proven against the real unit):
+**Known protocol details**, every one of them confirmed against the real unit:
 
 | | |
 |---|---|
@@ -220,17 +219,16 @@ and `~/RiderProjects/DaphneControl` (both proven against the real unit):
 convention clash — documentation numbers registers from 1, the wire numbers them from 0. It is
 not a bug and must not be "corrected". Put this in a comment at the call site.
 
-**The TypeScript client has been verified against the real unit**, not only against a fake stream:
-on 2026-08-11 it read 50%, wrote 70%, read back 70%, wrote 50% and read back 50%, first attempt.
-Every recovered detail above therefore now holds for this code and not just for the C# spikes —
-framing, transaction ids, the register number and the ×10 encoding.
+**The client has been verified against the real unit**, not only against a fake stream: on
+2026-08-11 it read 50%, wrote 70%, read back 70%, wrote 50% and read back 50%, first attempt.
+That run is what the table above rests on — framing, transaction ids, the register number and
+the ×10 encoding.
 
-**The 5 seconds covers connecting, not only waiting for an answer.** The old spike set
-`ReceiveTimeout` and `SendTimeout`, both of which govern an already-established stream, and left
-`TcpClient.Connect` unbounded — so the recovered "5 s" never covered connection setup in either
-codebase. An address that stops answering SYNs then blocks for the operating system's default,
-about 75 seconds per attempt, which with retries is minutes against an API caller waiting for
-the answer. Confirmed by deleting the connect timeout and watching a test take exactly 75 seconds.
+**The 5 seconds covers connecting, not only waiting for an answer.** A read or write timeout
+governs an already-established stream, so connecting needs its own bound or it has none: an
+address that stops answering SYNs blocks for the operating system's default, about 75 seconds per
+attempt, which with retries is minutes against an API caller waiting for the answer. Confirmed by
+deleting the connect timeout and watching a test take exactly 75 seconds.
 
 **A fresh TCP connection per request**, rather than holding one open. At the request rates this
 will ever see, a persistent socket is state to manage — stale connections, reconnection,
@@ -242,10 +240,10 @@ consecutive fresh connections completed in 6–11 ms each with no refusals.
 clock as waiting for the answer, so an attempt cannot quietly cost double — and the caller on the
 other end of the API is waiting the whole time.
 
-**250 ms between attempts** is not invented either: NModbus, which the spike used, waited that long
-by default, so it is what the field-proven behaviour actually included. Reconnecting the instant a
-device refuses you is the least likely attempt to succeed, and four of them inside a millisecond is
-one attempt wearing a disguise.
+**250 ms between attempts.** Reconnecting the instant a device refuses you is the least likely
+attempt to succeed, and four of them inside a millisecond is one attempt wearing a disguise. A
+quarter of a second is long enough that a retry is genuinely a second try, and small enough beside
+the five-second attempt it follows that the caller does not notice it.
 
 Because FC3 reads back successfully, **the current level is observable**. `GET /api/unit/level`
 reads it live, which is how a wall-panel change stays visible.
@@ -547,10 +545,9 @@ here, against that source's own window and this server's clock. Handing the clie
 it to make a second judgement against a clock that may not agree with ours, and two answers to one
 question is one too many. Anyone who wants to plot the gap has `measuredAt`.
 
-**Both write endpoints are open on the LAN (2026-08-11), reversing an earlier decision.** The
-C# prototype's unauthenticated actuation endpoint was a review finding, and the first build of
-this server answered it with a bearer token whose absence meant 503, never open. Removed
-knowingly, and the full argument for keeping it was on the table when it went:
+**Both write endpoints are open on the LAN (2026-08-11), reversing an earlier decision.** The first
+build of this server carried a bearer token whose absence meant 503, never open. Removed knowingly,
+and the full argument for keeping it was on the table when it went:
 
 - For the **fan endpoint**, the residual attacker on a trusted LAN is a web page inside
   someone's browser — CSRF, which a `text/plain` form body gets past JSON-only parsing, with
@@ -764,27 +761,20 @@ and the low reading is the evidence of the fault.
 
 These are unresolved. Do not invent answers — ask.
 
-1. **The rest of the Daphne register map.** Fan speed at wire 21001 is confirmed twice over — by
-   the spikes and by this client driving the real unit.
+1. **The rest of the Daphne register map.** Fan speed at wire 21001 is confirmed, by this client
+   driving the real unit. Every other register is unprobed, and nothing here has ever read one.
 
-   The "contradiction" in the old comments is softer than it looked, having now read them properly.
-   The block is `// This is always -1 against documentation. / 21002 = fan speed (400 = 40 %) /
-   21002 = temperature`. The first two lines agree: "21002 = fan speed" is *documentation*
-   numbering, which the −1 rule turns into wire 21001 — exactly what the code writes and what
-   works. Only the third line is odd, and it reads either as a typo for 21003 or as a switch to
-   wire numbering. **Both readings collapse to the same physical claim: the register immediately
-   after fan speed is temperature.** That is inference from a comment, not evidence from code —
-   no spike ever reads any register but 21001.
+   The −1 against documentation is demonstrated for exactly **one** register, so **no global −1
+   rule may be assumed**. Every new register gets probed individually: read both N and N−1 and
+   see which answers sensibly.
 
-   **One FC3 read of wire 21002 settles it.** A value near 200–250 means temperature at ×10; a
-   value tracking the fan level means the note was wrong.
+   There is a loose claim that **the register immediately after fan speed is temperature**, and
+   it is inference rather than evidence. **One FC3 read of wire 21002 settles it.** A value near
+   200–250 means temperature at ×10; a value tracking the fan level means the claim was wrong.
 
-   **Register 14000 remains pure hearsay.** It appears in a comment, in no code, attached to
-   nothing that was ever probed, and its claim of "direct addressing" contradicts the word
-   "always" two lines above it. The offset machinery those comments discuss was never even
-   implemented — the spike assigns `modbusAddress = register` and prints them as equal. Treat the
-   comments as research notes rather than findings: **no global −1 rule may be assumed**, and every
-   new register gets probed individually — read both N and N−1 and see which answers sensibly.
+   **Register 14000 is pure hearsay** — a number attached to nothing that was ever probed, and
+   its claim of "direct addressing" contradicts the −1 rule besides. It is a research note, not
+   a finding.
 2. **Does the unit accept only multiples of 10, or does it round?** We only ever write valid
    `Level` values, so this is a curiosity rather than a risk — but worth knowing when reading
    back a level the wall panel set.

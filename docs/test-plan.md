@@ -179,8 +179,7 @@ readings so "what happened last night" is a dashboard question rather than a she
 - FC3 response parsing
 - transaction id increments, and a response with a mismatched id is not accepted as the answer
 - timeout → error returned, no hang
-- a Modbus **exception response** surfaces as an error — the original C# spike swallowed these in
-  an empty `catch`, which is exactly the bug to test against
+- a Modbus **exception response** surfaces as an error, not a silent no-op
 - read-back after write disagrees with what was written → reported, not ignored
 - connection refused → the error propagates cleanly to the caller
 

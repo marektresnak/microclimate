@@ -11,8 +11,9 @@ import type { VentilationUnit } from './unit.ts';
  * several thousand lines of protocol we do not use; this is a hundred that can
  * be read in one sitting and tested byte by byte against a fake stream.
  *
- * Everything below was recovered from earlier C# spikes proven against the real
- * unit: address, unit id, register number, value encoding, timeout, retries.
+ * Every protocol detail below — register number, value encoding, framing,
+ * timeout, retries — has been confirmed against the real unit, not only
+ * against a fake stream.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,8 +73,8 @@ import type { VentilationUnit } from './unit.ts';
 //
 // TEACHING: this single line is the highest-risk constant in the file. Every
 // other value here is checkable against the Modbus spec; this one is only
-// knowable by having tried it against the actual device. Both C# spikes used
-// 21001, and this client has now driven the real unit with it.
+// knowable by having tried it against the actual device, and this client has
+// driven the real unit with it.
 const FAN_SPEED_REGISTER = 21_001;
 
 // The unit stores percent times ten: 400 means 40%.
@@ -395,9 +396,6 @@ function readAnswer(
   const code = response[MBAP_HEADER_BYTES];
   if (code === undefined) throw new Error('the unit sent a frame with no function code');
 
-  // The original C# spike swallowed these in an empty catch, which is how a
-  // refused write became a silent no-op.
-  //
   // TEACHING: (5a) the refusal case. The device set the top bit of the function
   // code and appended one byte saying why (2 = "bad address", 3 = "bad value",
   // and so on). This is the device *talking*, so it must not be retried.

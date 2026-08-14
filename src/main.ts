@@ -26,11 +26,11 @@ import { openReadingStore } from './store/readings.ts';
 // eventually, designed against the real readings this phase exists to gather.
 // See CLAUDE.md, "The automation comes later".
 
-// The five seconds is the spike's, and covers connecting as well as answering.
-// One retry, because the collector comes back around in thirty seconds anyway.
+// Five seconds per attempt, covering connecting as well as answering. One
+// retry, because the collector comes back around in thirty seconds anyway.
 const MODBUS_TIMEOUT = Temporal.Duration.from({ seconds: 5 });
 const MODBUS_RETRIES = 1;
-// What NModbus paused by default, so it is what the old spike was proven with.
+// Long enough that a retry is a second try rather than the same one repeated.
 const MODBUS_RETRY_PAUSE = Temporal.Duration.from({ milliseconds: 250 });
 
 // How often sources are OFFERED a poll, not how often they are polled — each

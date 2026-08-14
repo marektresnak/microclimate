@@ -362,8 +362,6 @@ describe('the wire', () => {
   });
 
   it('surfaces a Modbus exception instead of swallowing it', async () => {
-    // The original C# spike caught these into an empty block, which is how a
-    // refused write became a silent no-op.
     const fake = fakeStreams(() => [frame(0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x86, 0x02)]);
 
     await assert.rejects(unitOver(fake).set(50), /refused the request with Modbus exception 2/);

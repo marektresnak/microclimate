@@ -24,8 +24,6 @@ describe('the fake unit', () => {
   });
 
   it('surfaces a write failure rather than swallowing it', async () => {
-    // The original C# spike swallowed Modbus exceptions in an empty catch, which
-    // is exactly the behaviour the loop must be able to see.
     const unit = createFakeUnit(40);
     unit.failWrites = true;
 
