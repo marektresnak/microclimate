@@ -188,7 +188,11 @@ readings so "what happened last night" is a dashboard question rather than a she
 
 - vendor payload maps to `Reading[]` with the right kinds and canonical units
 - **the vendor's timestamp becomes `measured_at`**, not the time we polled
-- 401 → token refresh, then one retry
+- **Netatmo's expired-token answer — 403 with `error.code` 3 — → token refresh, then one retry.**
+  The status and the code both matter: the fixture used to say 401, which no real response ever
+  carries, so the case passed while the adapter could not refresh against the live API
+  (2026-08-14)
+- a 403 with any other code → reported as itself, no refresh, no retry
 - vendor 500 → returns an error; does not throw into the collector
 - malformed payload → error, and nothing partial is stored
 - **Netatmo polled twice inside its 7–8 minute refresh returns the same reading, and the second

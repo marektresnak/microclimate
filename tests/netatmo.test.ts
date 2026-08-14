@@ -55,6 +55,14 @@ function tokenGrant(refreshToken: string): ScriptStep {
   return { status: 200, json: { access_token: `access-for-${refreshToken}`, refresh_token: `rotated-${refreshToken}`, expires_in: 10_800 } };
 }
 
+/** What Netatmo actually answers once the access token has aged out, measured
+ * against the real API on 2026-08-14: a 403 carrying their own error code 3.
+ * The first build of these tests wrote 401 here — a guess, and green, while
+ * the adapter's refresh path could not fire against Netatmo at all. */
+function expiredAccessToken(): ScriptStep {
+  return { status: 403, json: { error: { code: 3, message: 'Access token expired' } } };
+}
+
 function homeCoach(co2: number): ScriptStep {
   return {
     status: 200,
@@ -145,11 +153,11 @@ describe('the netatmo source', () => {
     assert.match(dataRequest?.url ?? '', /gethomecoachsdata\?device_id=70%3Aee/);
   });
 
-  it('refreshes once on a 401 and retries once', async () => {
+  it('refreshes once on an expired access token and retries once', async () => {
     const fake = scriptedFetch([
       tokenGrant('seed-token'),
       homeCoach(842),
-      { status: 401, json: { error: { code: 3 } } },
+      expiredAccessToken(),
       tokenGrant('rotated-seed-token'),
       homeCoach(910),
     ]);
@@ -170,15 +178,31 @@ describe('the netatmo source', () => {
   it('gives up when the retry is also refused, rather than retrying forever', async () => {
     const fake = scriptedFetch([
       tokenGrant('seed-token'),
-      { status: 401, json: {} },
+      expiredAccessToken(),
       tokenGrant('rotated-seed-token'),
-      { status: 401, json: {} },
+      expiredAccessToken(),
     ]);
     const source = createNetatmoSource(options(), fake.impl);
 
     await assert.rejects(source.poll(NOW), /rejected an access token it just issued/);
     // Exactly one retry: four requests, none after the second refusal.
     assert.equal(fake.requests.length, 4);
+  });
+
+  it('does not refresh on a 403 that is not the expired-token code', async () => {
+    // The status alone would be enough to trigger a refresh; the code is what
+    // says this is not one. (Which code stands in for "some other refusal" is
+    // arbitrary here — only "not 3" is the contract.)
+    const fake = scriptedFetch([
+      tokenGrant('seed-token'),
+      { status: 403, json: { error: { code: 13, message: 'Operation forbidden' } } },
+    ]);
+    const source = createNetatmoSource(options(), fake.impl);
+
+    // Reported as itself, not as an expiry: a new access token does not fix a
+    // permission, and retrying would file it under a token just issued.
+    await assert.rejects(source.poll(NOW), /Netatmo answered 403/);
+    assert.equal(fake.requests.length, 2);
   });
 
   it('returns an error on a vendor 500, with nothing partial', async () => {
@@ -203,7 +227,7 @@ describe('the netatmo source', () => {
     const fake = scriptedFetch([
       tokenGrant('seed-token'),
       homeCoach(842),
-      { status: 401, json: {} },
+      expiredAccessToken(),
       tokenGrant('rotated-seed-token'),
       homeCoach(842),
     ]);

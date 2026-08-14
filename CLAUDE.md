@@ -159,9 +159,16 @@ Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push l
   CO₂. Reference: `~/dev/netatmo-sync/src/worker.js` (mine, working). **Netatmo only refreshes
   every 7–8 minutes on their side.** Polling it faster gains nothing.
 
-  `~/RiderProjects/DaphneControl` has files under `Sensors/Netatmo/`, and they are **stubs** —
-  every method throws `NotImplementedException`. There is no auth flow, no endpoint and no response
-  shape to recover there, so `netatmo-sync` is the only reference.
+  **An expired access token comes back as HTTP 403 with Netatmo's own `error.code` 3** — not the
+  401 an OAuth API is usually assumed to answer with. Measured against the real API on
+  2026-08-14, and it cost something to learn: the first build guessed 401 and its test pinned the
+  guess, so the suite ran green while the refresh path could not fire against Netatmo at all, and
+  polling died about three hours after every start. The reference worker never met this, which is
+  why nothing was mis-ported — it refreshes on every run, so it never holds an access token long
+  enough to expire. Both the status and the code are checked because both were observed; the
+  reasoning that produced the bug was inferring one of them from how OAuth APIs usually behave.
+  A 403 with any other code is reported as itself and not retried — a permission is not something
+  a fresh token fixes.
 - **SEN66** — Sensirion nine-in-one node (PM1, PM2.5, PM4, PM10, temperature, humidity, VOC
   index, NOx index, CO₂) over I²C behind an ESP32, pushing JSON to us. Not built yet; the
   ingest endpoint and a simulator script stand in.
@@ -724,9 +731,11 @@ the database, and a secret unencrypted on disk — which `.env` already is. A co
 rather than falling back to the environment seed: the seed is stale after the first rotation,
 and silently using it is a lockout dressed as a fallback.
 
-Access-token expiry is deliberately not tracked. The token is used until Netatmo answers 401,
+Access-token expiry is deliberately not tracked. The token is used until Netatmo refuses it,
 then refreshed and the request retried once — that path has to exist anyway, and a timer doing
-the same job would be a second mechanism. The price is one wasted request every ~3 hours.
+the same job would be a second mechanism. The price is one wasted request every ~3 hours. What
+the refusal looks like is a measured fact rather than a convention; see the Netatmo entry under
+"The physical setup".
 
 **The Netatmo poll interval is 5 minutes, from an inequality rather than taste.** A reading is
 up to one vendor refresh (≤ 8 min) old when fetched, plus up to one poll interval older before

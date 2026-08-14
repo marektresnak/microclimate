@@ -26,6 +26,16 @@ const HOME_COACH_URL = 'https://api.netatmo.com/api/gethomecoachsdata';
 // round trip and still small against the poll interval below.
 const REQUEST_TIMEOUT = Temporal.Duration.from({ seconds: 10 });
 
+// How Netatmo says an access token has aged out: HTTP 403 carrying its own
+// error code 3. Not the 401 this adapter first assumed — and the assumption
+// was not cheap. The test pinned the guess, so the suite stayed green while
+// the retry below could never fire against the real API, and polling died
+// about three hours after every start. Measured live on 2026-08-14. Both
+// halves are checked because both were observed; neither is inferred from how
+// OAuth APIs usually behave, which is the reasoning that produced the bug.
+const EXPIRED_TOKEN_STATUS = 403;
+const EXPIRED_TOKEN_CODE = 3;
+
 // Netatmo refreshes server-side every 7-8 minutes, so polling faster gains
 // nothing. Polling slower has a bound too: a reading is up to one vendor
 // refresh old when fetched, plus up to one poll interval older before we ask
@@ -73,10 +83,10 @@ export function createNetatmoSource(
   options: NetatmoOptions,
   fetchImpl: FetchLike = fetch,
 ): SensorSource {
-  // Access tokens last about three hours. Expiry is discovered by the 401
-  // rather than tracked against a clock: the 401 path has to exist anyway, and
-  // a timer doing the same job would be a second mechanism. The price is one
-  // wasted request every few hours.
+  // Access tokens last about three hours. Expiry is discovered from the
+  // refusal rather than tracked against a clock: that path has to exist
+  // anyway, and a timer doing the same job would be a second mechanism. The
+  // price is one wasted request every few hours.
   let accessToken: string | undefined;
 
   const fetchHomeCoach = async (token: string): Promise<Response> => {
@@ -147,18 +157,39 @@ export function createNetatmoSource(
 
     async poll(now) {
       const first = await fetchHomeCoach(accessToken ?? (await refreshAccessToken()));
-      if (first.status !== 401) return readingsOf(first, options.sourceId, now);
+      if (!(await isExpiredAccessToken(first))) return readingsOf(first, options.sourceId, now);
 
-      // The access token aged out. Refresh and retry once — a second 401 means
-      // Netatmo is rejecting a token it just issued, and asking a third time
-      // is not going to change its mind.
+      // The access token aged out. Refresh and retry once — a second expiry
+      // means Netatmo is rejecting a token it just issued, and asking a third
+      // time is not going to change its mind.
       const retried = await fetchHomeCoach(await refreshAccessToken());
-      if (retried.status === 401) {
+      if (await isExpiredAccessToken(retried)) {
         throw new Error('Netatmo rejected an access token it just issued');
       }
       return readingsOf(retried, options.sourceId, now);
     },
   };
+}
+
+/**
+ * Whether this refusal is the one a fresh access token fixes.
+ *
+ * The body has to be read to tell, so the response is cloned: when the answer
+ * is some other 403 — a permission, a proxy — `readingsOf` still needs its own
+ * copy to report it whole. Retrying that one would burn a refresh and then
+ * misname the fault as a token Netatmo just issued and rejected.
+ */
+async function isExpiredAccessToken(response: Response): Promise<boolean> {
+  if (response.status !== EXPIRED_TOKEN_STATUS) return false;
+
+  // A 403 that is not JSON at all came from something in front of Netatmo, and
+  // a new token does not fix that either.
+  const payload: unknown = await response
+    .clone()
+    .json()
+    .catch(() => undefined);
+
+  return errorCodeOf(payload) === EXPIRED_TOKEN_CODE;
 }
 
 async function readingsOf(
@@ -196,6 +227,19 @@ async function readingsOf(
 
 /** Everything below is narrowing, in the store's toReading style: each check
  * rejects one way the payload could be wrong, and names it. */
+
+/** Netatmo's error envelope is `{ error: { code, message } }`. Anything that
+ * is not that shape has no code, which reads as "not an expiry". */
+function errorCodeOf(payload: unknown): number | undefined {
+  if (payload === null || typeof payload !== 'object' || !('error' in payload)) return undefined;
+
+  const error = payload.error;
+  if (error === null || typeof error !== 'object' || !('code' in error) || typeof error.code !== 'number') {
+    return undefined;
+  }
+
+  return error.code;
+}
 
 function tokenResponseOf(payload: unknown): {
   accessToken: string;
