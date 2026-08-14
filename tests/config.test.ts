@@ -75,12 +75,18 @@ describe('topology', () => {
     assertDeepEqual(PRECEDENCE.bedroom.co2, ['bedroom_netatmo']);
   });
 
-  it('gives Netatmo a window wide enough for two of its own refreshes', () => {
-    // The per-source design in one assertion: Tado's window would call a
-    // perfectly healthy Netatmo reading dead within two minutes.
+  it('gives each vendor a window wider than its own publishing interval', () => {
+    // The per-source design in one assertion, and both numbers are derived
+    // rather than chosen: Netatmo refreshes every 7-8 minutes, so 15 covers two
+    // of those; Tado publishes on a 20-minute heartbeat when nothing crosses a
+    // threshold, so its window has to be wider still — 21 minutes at the
+    // absolute minimum, once our own 1-minute poll interval is added.
     assert.ok(Temporal.Duration.compare(SENSORS.bedroom_netatmo.freshnessWindow, { minutes: 15 }) >= 0);
+    assert.ok(Temporal.Duration.compare(SENSORS.bedroom_tado.freshnessWindow, { minutes: 21 }) > 0);
+    // Which way round they sit is the thing worth pinning: Netatmo's window
+    // would call a perfectly healthy Tado heartbeat dead.
     assert.ok(
-      Temporal.Duration.compare(SENSORS.bedroom_tado.freshnessWindow, SENSORS.bedroom_netatmo.freshnessWindow) < 0,
+      Temporal.Duration.compare(SENSORS.bedroom_tado.freshnessWindow, SENSORS.bedroom_netatmo.freshnessWindow) > 0,
     );
   });
 });

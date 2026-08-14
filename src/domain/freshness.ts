@@ -5,7 +5,9 @@ import type { RoomSignal } from './signal.ts';
  * How much one reading is currently worth, judged against that instrument's own
  * window. The window is a parameter rather than a lookup because the caller
  * knows which source it asked about, and because a single global staleness
- * window cannot judge a 30-second Tado reading and a 6-minute Netatmo one.
+ * window cannot judge both a 20-minute-old Tado reading (healthy — that is its
+ * heartbeat) and a Netatmo that has been silent for 20 minutes (two missed
+ * refreshes, and not healthy at all).
  */
 export function toRoomSignal(
   reading: Reading | undefined,

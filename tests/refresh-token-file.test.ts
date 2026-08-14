@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { loadRefreshToken, saveRefreshToken } from '../src/sources/netatmo-token.ts';
+import { loadRefreshToken, saveRefreshToken } from '../src/sources/refresh-token-file.ts';
 import { assertDeepEqual } from './support/deep-equal.ts';
 
 function temporaryPath(): string {
-  return join(mkdtempSync(join(tmpdir(), 'netatmo-token-')), 'token.json');
+  return join(mkdtempSync(join(tmpdir(), 'refresh-token-')), 'token.json');
 }
 
-describe('the netatmo token file', () => {
+describe('the refresh token file', () => {
   it('round-trips a token', () => {
     const path = temporaryPath();
 
@@ -25,7 +25,7 @@ describe('the netatmo token file', () => {
   });
 
   it('creates the directory if it is not there yet', () => {
-    const path = join(mkdtempSync(join(tmpdir(), 'netatmo-token-')), 'deeper', 'token.json');
+    const path = join(mkdtempSync(join(tmpdir(), 'refresh-token-')), 'deeper', 'token.json');
 
     saveRefreshToken(path, 'abc');
 

@@ -1,8 +1,8 @@
 import type { SensorId } from '../config.ts';
 import { messageOf } from '../domain/errors.ts';
 import type { Reading } from '../domain/measurement.ts';
-import { loadRefreshToken, saveRefreshToken } from './netatmo-token.ts';
-import type { SensorSource } from './source.ts';
+import { loadRefreshToken, saveRefreshToken } from './refresh-token-file.ts';
+import type { FetchLike, SensorSource } from './source.ts';
 
 /**
  * The Netatmo Home Coach, over their cloud API.
@@ -44,8 +44,6 @@ const EXPIRED_TOKEN_CODE = 3;
 // periodically read as stale through our own polling. Five minutes gives
 // margin on both sides; the store's uniqueness constraint absorbs the repeats.
 const POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 });
-
-export type FetchLike = typeof fetch;
 
 /**
  * The app registration and the token file — one identity, built once in

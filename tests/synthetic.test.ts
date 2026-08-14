@@ -22,16 +22,20 @@ describe('the synthetic sources', () => {
     }
   });
 
-  it('gives the two kids-room valves different temperatures', async () => {
-    // Not a detail: the whole never-average rule exists because these two
-    // disagree, and a demo where they agree hides the thing worth showing.
-    const readings = await createSyntheticTado().poll(NOW);
-    const temperatures = readings.filter((reading) => reading.kind === 'temperature');
+  it('gives the bedroom valve and the Home Coach different temperatures', async () => {
+    // Not a detail: the whole never-average rule exists because two instruments
+    // in one room disagree, and a demo where they agree hides the thing worth
+    // showing. The bedroom is where that pair lives — the valve head on the
+    // radiator against the Home Coach across the room.
+    const netatmo = await createSyntheticNetatmo().poll(NOW);
+    const tado = await createSyntheticTado().poll(NOW);
 
-    const left = temperatures.find((reading) => reading.sourceId === 'kids_room_tado_left');
-    const right = temperatures.find((reading) => reading.sourceId === 'kids_room_tado_right');
+    const coach = netatmo.find((reading) => reading.kind === 'temperature');
+    const valve = tado.find(
+      (reading) => reading.kind === 'temperature' && reading.sourceId === 'bedroom_tado',
+    );
 
-    assert.notEqual(left?.value, right?.value);
+    assert.notEqual(coach?.value, valve?.value);
   });
 
   it('repeats itself inside a Netatmo refresh, and the store absorbs the repeat', async () => {

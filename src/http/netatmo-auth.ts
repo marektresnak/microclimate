@@ -4,8 +4,9 @@ import { Hono } from 'hono';
 import { html } from 'hono/html';
 
 import { NETATMO_TOKEN_URL } from '../sources/netatmo.ts';
-import type { FetchLike, NetatmoSettings } from '../sources/netatmo.ts';
-import { saveRefreshToken } from '../sources/netatmo-token.ts';
+import type { NetatmoSettings } from '../sources/netatmo.ts';
+import { saveRefreshToken } from '../sources/refresh-token-file.ts';
+import type { FetchLike } from '../sources/source.ts';
 
 /**
  * The Netatmo onboarding pair — GET /auth/netatmo and its callback — mounted

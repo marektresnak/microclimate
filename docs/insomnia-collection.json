@@ -302,10 +302,10 @@
       "_id": "req_sensor_history_sibling",
       "_type": "request",
       "parentId": "fld_history",
-      "name": "GET /api/sensors/kids_room_tado_right/readings — the second valve",
-      "description": "The kids' room has two Tado valves and they read differently, because they sit next to different radiators. `/api/state` shows only whichever precedence ranks first; this is how you see the other one.\n\nNothing ever averages them — a mean describes neither.",
+      "name": "GET /api/sensors/bedroom_tado/readings — the other bedroom instrument",
+      "description": "The bedroom has two instruments and they read differently: the Tado valve head sits on the radiator, the Netatmo Home Coach stands across the room. `/api/state` shows only whichever precedence ranks first — the Home Coach — and this is how you see the other one.\n\nNothing ever averages them — a mean describes neither.",
       "method": "GET",
-      "url": "{{ _.base_url }}/api/sensors/kids_room_tado_right/readings",
+      "url": "{{ _.base_url }}/api/sensors/bedroom_tado/readings",
       "body": {},
       "parameters": [
         {
@@ -954,6 +954,37 @@
       "settingRebuildPath": true,
       "settingFollowRedirects": "off",
       "metaSortKey": 200
+    },
+    {
+      "_id": "fld_tado_auth",
+      "_type": "request_group",
+      "parentId": "wrk_microclimate",
+      "name": "Tado onboarding",
+      "description": "One route, not a pair. Tado uses the RFC 8628 device flow, where the vendor never calls us back — so the page is the state machine: it hands out a code and polls Tado once per page load, driven by a `<meta http-equiv=\"refresh\">` at the interval Tado asked for.\n\nAnswers 503 with an explanation unless TADO_TOKEN_PATH is set, which is also Tado's on-switch: the device flow has no client secret, so there is no credential in the environment to key on.\n\nThis is a browser route. Insomnia can show you the waiting page and the codes, but the real flow is: open `/auth/tado`, approve on your phone, leave the tab alone. The adapter re-reads the token file on its next refresh, no restart.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": 650
+    },
+    {
+      "_id": "req_tado_auth_start",
+      "_type": "request",
+      "parentId": "fld_tado_auth",
+      "name": "GET /auth/tado",
+      "description": "First send: starts a flow and returns the waiting page, carrying the verification link, the user code and the meta refresh.\n\nSend it again to poll once more — one request to Tado per send, never a loop. Tado has historically rate limited clients that poll harder than they were told to, and `slow_down` adds five seconds to the interval.\n\nOnce someone approves the code, this answers with a page that has no meta refresh on it, and the refresh token is in the file.",
+      "method": "GET",
+      "url": "{{ _.base_url }}/auth/tado",
+      "body": {},
+      "parameters": [],
+      "headers": [],
+      "authentication": {},
+      "isPrivate": false,
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "off",
+      "metaSortKey": 100
     },
     {
       "_id": "fld_misc",

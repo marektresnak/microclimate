@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { createNetatmoSource } from '../src/sources/netatmo.ts';
-import type { FetchLike, NetatmoOptions, NetatmoSettings } from '../src/sources/netatmo.ts';
-import { loadRefreshToken, saveRefreshToken } from '../src/sources/netatmo-token.ts';
+import type { NetatmoOptions, NetatmoSettings } from '../src/sources/netatmo.ts';
+import { loadRefreshToken, saveRefreshToken } from '../src/sources/refresh-token-file.ts';
+import type { FetchLike } from '../src/sources/source.ts';
 import { openReadingStore } from '../src/store/readings.ts';
 import { assertDeepEqual } from './support/deep-equal.ts';
 

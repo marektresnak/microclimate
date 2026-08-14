@@ -156,11 +156,80 @@ Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push l
 | Room | Sensors today | Planned |
 |---|---|---|
 | `living_room` | 1× Tado valve (temperature, humidity) | SEN66 |
-| `kids_room` | 2× Tado valve (temperature, humidity) — two radiators | SEN66 |
+| `kids_room` | 2× Tado valve on two radiators — **one zone, one reading** (temperature, humidity) | SEN66 |
 | `bedroom` | 1× Tado valve + Netatmo Home Coach (temperature, humidity, **CO₂**) | SEN66 |
 
-- **Tado** — pull, OAuth device flow. Per-zone temperature and humidity. Port the client from
-  `~/dev/tado-monitor/src/tado-client.ts` (mine, working).
+- **Tado** — pull, **built 2026-08-14**, ported from `~/dev/tado-monitor/src/tado-client.ts`
+  (mine, polling this same account today). Temperature and humidity **per zone, not per valve**:
+  a zone reports one `sensorDataPoints`, from whichever device Tado designates, so the readable
+  instrument is the zone and the kids' room's two valves are one reading. Both datapoints carry
+  their own timestamp and both are kept.
+
+  **The auth is the RFC 8628 device flow and there is no client secret** — the client id is
+  public and hardcoded in the adapter. Tado removed the old password grant on 2025-03-04, so this
+  is not one option among several. `/auth/tado` runs it: hand out a code, let a human approve it
+  elsewhere, ask again until the answer changes.
+
+  **Access tokens live 10 minutes and the refresh token is single-use** — Tado's own documentation
+  says the old one is revoked the moment the new one is issued. So refreshing is the *hot path*
+  here, roughly every tenth poll, where Netatmo's is a three-hourly event. The rotation is
+  persisted before the new access token is used, as it is for Netatmo, and here a lost rotation is
+  a lockout within the hour rather than within the month.
+
+  **The refusal is a plain HTTP 401**, in all three variants measured against the live API on
+  2026-08-14. An absent or garbage bearer token answers `{"errors":[{"code":"unauthorized",
+  "title":"Full authentication is required to access this resource"}]}`; a token held past its ten
+  minutes answers the same status with `"title":"access token is expired"`. So the status alone
+  triggers refresh-and-retry-once and no body is read — every variant means the same thing and a
+  fresh token is the only fix, while a 403 is a permission and is reported as itself. Measured
+  rather than inferred *because* of the Netatmo entry below.
+
+  **The refresh-and-retry path has been watched firing against the live API**, which for a
+  ten-minute token is not a rare branch but a thing that happens six times an hour: the service ran
+  through its token's expiry at 08:13 on 2026-08-14 and the poll simply succeeded — one 401, one
+  refresh, one retry, no log line, no missed reading, and the rotated token in the file behind it.
+  That is the risk this vendor carries (a bug here is a lockout within the hour, not the month) and
+  it is the one that most needed seeing rather than asserting.
+
+  **The auth parameters ride the query string of a POST with no body at all.** It looks like a
+  mistake and it is what the endpoint accepts; the call site says so, and a test pins the absent
+  body.
+
+  **A healthy reading can be 20 minutes old.** A valve measures every minute, but the published
+  value only moves when a reading crosses a threshold — around 0.5 °C or 5 %RH — with a 20-minute
+  heartbeat regardless. That is where the 25-minute freshness window comes from: up to 20 minutes
+  old when fetched, plus up to one 1-minute poll interval before the next fetch, so any window
+  under 21 minutes calls a healthy instrument stale. It was 90 seconds until the adapter was
+  built, a number that assumed a poll produces a fresh value.
+
+  **One poll is one request for the whole flat**: `GET /homes/{id}/zoneStates`, after a one-time
+  discovery of the home id and the zone list. Confirmed against the account on 2026-08-14 —
+  `{"zoneStates": {"1": {…}, "2": {…}, "5": {…}}}`, keyed by zone id as a string, and byte for byte
+  the same state a per-zone `/zones/{id}/state` returns.
+
+  **`link.state` is `ONLINE`, and nothing reads it.** The first build skipped any zone whose link
+  was not `CONNECTED` — a value taken from the reference client's type definition, which no real
+  answer has ever carried. Every zone in the flat was silently skipped: `tado: 0 readings, 0 new`,
+  with no reason given, because a skip is deliberately quiet. Rather than trade one guess for a
+  measured constant, the check is gone: the field is the vendor's *second* opinion about freshness,
+  and this project already judges freshness on the instant the reading was stamped with — a valve
+  that stops reporting keeps re-publishing its last stamp until the window calls the room stale.
+  One question, one switch, the same argument that took `isActive` out of `precedence.ts`.
+
+  **Each zone publishes on its own schedule, and both of its datapoints share one stamp.** In the
+  measured answer the three zones were stamped 07:41, 07:46 and 07:52 — so a reading 17 minutes old
+  is a healthy one, which is the 25-minute window earning its derivation. Temperature and humidity
+  carried the *same* instant within each zone, so they are not two clocks in practice; the adapter
+  still keeps each field's own stamp, because they are two fields and letting one speak for the
+  other would be a rule the payload does not state.
+
+  **A zone with nothing to say is skipped in silence**, and the other zones' readings still land:
+  not connected, no sensors, missing from the answer. The report of that gap is `/api/state`
+  turning the room stale against its own window, which is what the window is for — where a line
+  per skipped zone per poll would be 1,440 a day for one flat battery, saying nothing the state
+  endpoint does not say better. The one skip that is *our* mistake rather than the vendor's — a
+  zone id the account does not have — is logged once at discovery with the whole zone list beside
+  it. A payload that fails to *narrow* is the opposite case and throws the poll away whole.
 - **Netatmo Home Coach** — pull, OAuth refresh flow, `gethomecoachsdata`. Temperature, humidity,
   CO₂. Reference: `~/dev/netatmo-sync/src/worker.js` (mine, working). **Netatmo only refreshes
   every 7–8 minutes on their side.** Polling it faster gains nothing.
@@ -181,9 +250,10 @@ Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push l
 - **Tado thermostats** are read-only to us. We collect their values. We never control heating.
   That stays entirely with Tado.
 
-**Because sources refresh at wildly different rates, freshness is per-source, not global.** A
-30-second-old Tado reading and a 6-minute-old Netatmo reading are both fine; one global staleness
-window cannot judge both. This is a load-bearing design constraint, not a detail.
+**Because sources publish at wildly different rates, freshness is per-source, not global.** A
+20-minute-old Tado reading is healthy — that is its heartbeat — while a Netatmo that has said
+nothing for 20 minutes has missed two refreshes and is not. One global staleness window cannot
+judge both, in either direction. This is a load-bearing design constraint, not a detail.
 
 ---
 
@@ -504,6 +574,7 @@ Two views of the same data, and one rule shared between them.
 | `POST /api/unit/level` | Sets the fan. `assertCommandedLevel` refuses 90 and 100. **Deliberately unauthenticated** — see below. |
 | `POST /api/readings` | Batch ingest for the push nodes: a JSON array of readings, each with its own ISO 8601 `measuredAt`. Future rejected beyond 5 min of skew, any past accepted, replay idempotent. **Also unauthenticated** — same decision below. |
 | `GET /auth/netatmo` (+ `/callback`) | Netatmo OAuth onboarding, so no token is ever pasted by hand. |
+| `GET /auth/tado` | Tado device-flow onboarding. One route, no callback: the page shows the code and polls the vendor once per load. |
 | `GET /health` | Liveness. |
 
 **Every instant in this API is an ISO 8601 string, in and out. Epoch milliseconds never appear.**
@@ -574,8 +645,11 @@ overview only needs "bedroom temperature", but the moment a number looks wrong t
 is which instrument said so, and the answer should already be in the response.
 
 **Never average two instruments.** Precedence is an ordered list per `(room, kind)` and the first
-fresh source wins. The kids' room has two Tado valves both reporting temperature; they read
-differently because they are next to different radiators, and a mean describes neither.
+fresh source wins. The bedroom has two instruments reporting temperature and humidity — the Tado
+valve head sits on the radiator and reads warm, the Netatmo Home Coach stands across the room —
+and a mean describes neither. (The kids' room used to be this example, on the assumption that its
+two valves were two readable instruments. They are one Tado zone and one reading; see "The
+physical setup".)
 
 ## Architecture
 
@@ -583,8 +657,9 @@ differently because they are next to different radiators, and a mean describes n
 src/
   config.ts             SOLE source of truth for topology: rooms, sensors
                         (with isActive), per-(room, kind) precedence, freshness
-                        windows — all `as const`. RoomId and SensorId are
-                        derived from it, so a typo is a compile error.
+                        windows, the Tado zone map — all `as const`. RoomId and
+                        SensorId are derived from it, so a typo is a compile
+                        error, in TADO_ZONES as much as in a precedence list.
   domain/
     measurement.ts      MeasurementKind, Reading
     level.ts            Level, CommandedLevel, narrowing
@@ -597,10 +672,16 @@ src/
     precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
                         The one rule for what a room currently says.
   sources/
-    source.ts           SensorSource interface
+    source.ts           the two seams an adapter is built from: the
+                        SensorSource interface, and FetchLike — `fetch` as a
+                        parameter. Neither belongs to a vendor, which is why
+                        FetchLike stopped living in netatmo.ts (2026-08-14):
+                        the Tado adapter was importing the Netatmo one for a
+                        type alias.
     synthetic.ts        plausible CO₂ curves on a schedule, so `npm start` runs
-                        without hardware. A demo, not a simulation. Never runs
-                        beside a real source — same source ids, real database.
+                        without hardware. A demo, not a simulation. Runs only
+                        while NEITHER vendor is configured — same source ids,
+                        real database.
     collector.ts        poll -> store, each source on its own cadence.
     netatmo.ts          pull adapter: OAuth refresh, gethomecoachsdata.
                         fetch is injected the way OpenStream is in modbus-tcp.
@@ -608,9 +689,16 @@ src/
                         builds once and hands whole to this adapter AND the
                         onboarding routes, so the two cannot disagree on
                         where the token file lives.
-    netatmo-token.ts    the rotating refresh token, as a file on disk —
+    refresh-token-file.ts
+                        a rotating refresh token, as a file on disk —
                         deliberately not a database row. See "Configuration".
-    tado.ts             pull adapter                          (not built yet)
+                        One file per vendor, named by the caller; it lost the
+                        vendor from its name (2026-08-14) when Tado turned out
+                        to need the identical thing.
+    tado.ts             pull adapter: device-flow refresh, then one bulk read
+                        of every zone's state per poll. Defines TadoSettings —
+                        the same shared-identity trick as NetatmoSettings, and
+                        also Tado's on-switch. fetch injected the same way.
   ingest/
     http.ts             batch validation and storage for POST /api/readings;
                         the route itself lives in http/server.ts
@@ -631,6 +719,10 @@ src/
                         server.ts — the HTTP layer's human-facing half: its
                         only HTML, its only mutable value (the OAuth state)
                         and its only outbound fetch
+    tado-auth.ts        the /auth/tado onboarding route — ONE route, because
+                        the device flow has no callback: the page polls the
+                        vendor once per load, driven by a meta refresh at the
+                        interval Tado asked for. Mounted the same way.
   temporal-guard.ts     refuses a runtime without Temporal, as main.ts's first
                         import — Homebrew's node compiles it out. See "Runtime
                         and dependencies".
@@ -705,7 +797,8 @@ system promises.
 ## Configuration
 
 `config.ts` is the sole source of truth for **topology**: rooms; sensors with their room, kinds,
-`isActive` flag and freshness window; per-`(room, kind)` precedence order. All `as const`, so
+`isActive` flag and freshness window; per-`(room, kind)` precedence order; and `TADO_ZONES`, which
+says which Tado zone answers for which sensor id. All `as const`, so
 ids are literal union types and a typo is a compile error. Every time span in it — the freshness
 windows, the poll intervals — is a `Temporal.Duration` (2026-08-12), so the unit travels with
 the type instead of living in an `Ms` suffix. Spans become numbers again only at the platform's
@@ -717,33 +810,48 @@ local hour reads it from there, so behaviour never depends on how the host's clo
 and never shifts by an hour twice a year if the host is ever UTC. Temporal handles the DST
 transitions; a fixed offset would not.
 
-Secrets — Tado and Netatmo OAuth, the Modbus host — come from environment variables and are
-never committed. One secret cannot live there:
+Secrets — Netatmo's OAuth app, the Modbus host — come from environment variables and are never
+committed. Tado has no secret to keep: its device flow has no client secret at all, and the
+client id is public. What neither vendor's credential can do is live in the environment:
 
-**The Netatmo refresh token lives in a file** (`data/netatmo-token.json`, `NETATMO_TOKEN_PATH`
-to move it), because Netatmo **rotates** it on every refresh — the reference worker observed
-this live against this device, it is not caution. Something mutable has to hold the current one,
-and the two other candidates lose: an environment variable cannot be rewritten by a running
-process, and the database is append-only with no mutable row in it, on purpose — a credentials
-row would quietly spend that property, and would put a live secret inside every database
-backup besides. The file is written atomically (temp + rename, mode 0600), the new token is
-persisted **before** the new access token is used (a crash in between must cost a poll, not the
-credential), and the adapter re-reads the file on every refresh, so a re-authorisation through
-`/auth/netatmo` takes effect without a restart. Cost, accepted: one more file to back up beside
-the database, and a secret unencrypted on disk — which `.env` already is. A corrupt file throws
-rather than falling back to the environment seed: the seed is stale after the first rotation,
-and silently using it is a lockout dressed as a fallback.
+**Each vendor's refresh token lives in a file** — `data/netatmo-token.json` and
+`data/tado-token.json`, moved with `NETATMO_TOKEN_PATH` and `TADO_TOKEN_PATH`, both through the
+one `sources/refresh-token-file.ts` — because **both vendors rotate it on every refresh**. For
+Netatmo the reference worker observed it live against this device; for Tado the documentation is
+explicit that the old token is revoked the instant the new one is issued. Something mutable has to
+hold the current one, and the two other candidates lose: an environment variable cannot be
+rewritten by a running process, and the database is append-only with no mutable row in it, on
+purpose — a credentials row would quietly spend that property, and would put a live secret inside
+every database backup besides. The file is written atomically (temp + rename, mode 0600), the new
+token is persisted **before** the new access token is used (a crash in between must cost a poll,
+not the credential), and each adapter re-reads its file on every refresh, so a re-authorisation
+through `/auth/netatmo` or `/auth/tado` takes effect without a restart. Cost, accepted: two more
+files to back up beside the database, and a secret unencrypted on disk — which `.env` already is.
+A corrupt file throws rather than returning "no token": for Netatmo that would silently fall back
+to an environment seed that is stale after the first rotation, and for Tado it would ask for a
+fresh authorisation the operator did not know they needed.
 
-Access-token expiry is deliberately not tracked. The token is used until Netatmo refuses it,
-then refreshed and the request retried once — that path has to exist anyway, and a timer doing
-the same job would be a second mechanism. The price is one wasted request every ~3 hours. What
-the refusal looks like is a measured fact rather than a convention; see the Netatmo entry under
+**`TADO_TOKEN_PATH` is also Tado's on-switch**, since there is no credential in the environment to
+key on: set it and the real valves are polled, unset and they are not. Keyed on the *variable*
+rather than on whether the file exists, deliberately — a token file that has gone missing must
+fail loudly at every poll and point at `/auth/tado`, not quietly flip the service back to writing
+synthetic readings under real source ids. One switch per vendor, and they are independent: with
+only Netatmo configured the Tado rooms simply read `missing`, which is the honest answer.
+
+Access-token expiry is deliberately not tracked for either vendor. The token is used until the
+vendor refuses it, then refreshed and the request retried once — that path has to exist anyway,
+and a timer doing the same job would be a second mechanism. The price is one wasted request per
+token lifetime: every ~3 hours for Netatmo, every 10 minutes for Tado, which is the same argument
+holding at a hundred times the rate rather than a different one. What the refusal looks like is a
+measured fact rather than a convention for both of them — 403 with code 3, and a plain 401; see
 "The physical setup".
 
-**The Netatmo poll interval is 5 minutes, from an inequality rather than taste.** A reading is
-up to one vendor refresh (≤ 8 min) old when fetched, plus up to one poll interval older before
-the next fetch. Against the 15-minute freshness window the interval must stay under 7 minutes,
-or a healthy instrument periodically reads as stale through our own polling.
+**Both poll intervals come from an inequality rather than from taste.** A reading is up to one
+vendor publishing interval old when fetched, plus up to one poll interval older before the next
+fetch, and the sum has to fit inside that source's freshness window. For Netatmo: ≤ 8 min refresh
+against a 15-minute window, so the interval must stay under 7 — it is 5. For Tado: a 20-minute
+heartbeat against a 25-minute window, so the interval must stay under 5 — it is 1, because a
+threshold crossing should be seen promptly and the dedup constraint absorbs the repeats for free.
 
 **Two numbers describe the world rather than configure the service: 20 and 80.** The floor is
 what the unit does; the ceiling is what the intake grille in this flat allows. They live in the
@@ -781,6 +889,22 @@ These are unresolved. Do not invent answers — ask.
 3. **Push authentication — decided (2026-08-11): none.** Every endpoint is open on the trusted
    LAN; the acceptance and its bounds are recorded in the read-API section. If exposure ever
    grows beyond the LAN or tailnet, auth arrives at the edge, in front of the whole service.
+4. **Tado is verified against the real account (2026-08-14) — one thing is still unobserved.**
+   The first authorised session settled everything that was open: the zone ids are in `TADO_ZONES`,
+   the `zoneStates` envelope is what the adapter expected, `link.state` is `ONLINE` and is no longer
+   read, and one poll produced `tado: 6 readings, 6 new` with all three rooms answering `/api/state`
+   under the right sourceIds. All of it is written up in the Tado entry under "The physical setup".
+
+   **What the heartbeat does to dedup is still unobserved.** If Tado re-publishes an unchanged
+   value with an advanced timestamp every ~20 minutes, this source stores "new" rows of unchanged
+   values and its collector line reads "N new" where Netatmo's reads "0 new" inside its refresh
+   window. Correct either way — the instrument genuinely spoke again — and there is a comment in
+   the adapter so nobody "fixes" it. It needs an hour of running to say which; nothing depends on
+   the answer.
+
+   Also unobserved, and cheap to leave that way: what a `HOT_WATER` zone's `sensorDataPoints` looks
+   like (this account has no such zone at all — the discovery log would name it, and either absent
+   or `{}` yields no readings).
 
 ---
 

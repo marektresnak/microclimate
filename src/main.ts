@@ -8,11 +8,14 @@ import { dirname } from 'node:path';
 import { createFakeUnit } from './actuator/fake.ts';
 import { createModbusUnit } from './actuator/modbus-tcp.ts';
 import type { VentilationUnit } from './actuator/unit.ts';
+import { TADO_ZONES } from './config.ts';
 import { createApiServer } from './http/server.ts';
 import { createCollector } from './sources/collector.ts';
 import { createNetatmoSource } from './sources/netatmo.ts';
 import type { NetatmoSettings } from './sources/netatmo.ts';
 import type { SensorSource } from './sources/source.ts';
+import { createTadoSource } from './sources/tado.ts';
+import type { TadoSettings } from './sources/tado.ts';
 import { toIsoUtc } from './domain/time.ts';
 import { createSyntheticNetatmo, createSyntheticTado } from './sources/synthetic.ts';
 import { openLogStore } from './store/logs.ts';
@@ -99,22 +102,47 @@ const netatmoSettings: NetatmoSettings | undefined =
       }
     : undefined;
 
-// Real credentials mean ONLY real sources. The synthetic Netatmo writes under
-// the same source_id as the real one, so mixing them would salt the database
-// with invented readings — and the record of real air this phase exists to
-// gather has to be real or it is worthless.
-function chooseSources(): readonly SensorSource[] {
-  if (netatmoSettings === undefined) return [createSyntheticNetatmo(), createSyntheticTado()];
+// Tado's on-switch is the token path itself: the device flow has no client
+// secret, so there is no credential in the environment to key on. Keyed on the
+// variable rather than on whether the file exists, deliberately — a lost token
+// file has to fail loudly at every poll and point at /auth/tado, not quietly
+// flip the service back to writing synthetic readings into the real database.
+const tadoTokenPath = envOrUndefined('TADO_TOKEN_PATH');
+const tadoSettings: TadoSettings | undefined =
+  tadoTokenPath === undefined ? undefined : { tokenPath: tadoTokenPath };
 
-  return [
-    createNetatmoSource({
-      settings: netatmoSettings,
-      deviceId: envOrUndefined('NETATMO_DEVICE_ID'),
-      sourceId: 'bedroom_netatmo',
-      seedRefreshToken: envOrUndefined('NETATMO_REFRESH_TOKEN'),
-      log,
-    }),
-  ];
+// Configuring a vendor means its REAL adapter and nothing else. The synthetic
+// sources write under the same source ids as the real ones, so mixing them
+// would salt the database with invented readings — and the record of real air
+// this phase exists to gather has to be real or it is worthless.
+//
+// One switch per vendor, so the two are independent: with only Netatmo
+// configured the Tado rooms simply go quiet, which is the honest answer and the
+// one /api/state already knows how to give. The synthetic pair stands in only
+// while neither vendor is configured, which is what makes `npm start` a demo on
+// a machine with no credentials at all.
+function chooseSources(): readonly SensorSource[] {
+  const real: SensorSource[] = [];
+
+  if (netatmoSettings !== undefined) {
+    real.push(
+      createNetatmoSource({
+        settings: netatmoSettings,
+        deviceId: envOrUndefined('NETATMO_DEVICE_ID'),
+        sourceId: 'bedroom_netatmo',
+        seedRefreshToken: envOrUndefined('NETATMO_REFRESH_TOKEN'),
+        log,
+      }),
+    );
+  }
+
+  if (tadoSettings !== undefined) {
+    real.push(createTadoSource({ settings: tadoSettings, zones: TADO_ZONES, log }));
+  }
+
+  if (real.length === 0) return [createSyntheticNetatmo(), createSyntheticTado()];
+
+  return real;
 }
 
 const unit = chooseUnit();
@@ -126,6 +154,7 @@ const server = createApiServer({
   logs: logStore,
   unit,
   netatmoAuth: netatmoSettings,
+  tadoAuth: tadoSettings,
   clock: () => Temporal.Now.instant(),
   log,
 });

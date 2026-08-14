@@ -87,17 +87,24 @@ describe('freshness', () => {
   });
 
   it('gives the same reading two different verdicts under two windows', () => {
-    // The whole per-source design in one assertion. Eight minutes old is a
-    // perfectly healthy Netatmo reading and a long-dead Tado one.
-    const eightMinutesOld = co2ReadingAt(NOW.subtract({ minutes: 8 }));
+    // The whole per-source design in one assertion. Twenty minutes old is a
+    // long-dead Netatmo reading — it refreshes every 7-8 minutes, so silence
+    // that long means something is wrong — and a perfectly healthy Tado one,
+    // which publishes on a 20-minute heartbeat when nothing crosses a
+    // threshold. Neither window can judge the other's instrument.
+    //
+    // The direction here used to be the other way round, with Tado on 90
+    // seconds. That number assumed a poll produces a fresh value; the vendor's
+    // heartbeat is what actually decides, and it is longer than Netatmo's.
+    const twentyMinutesOld = co2ReadingAt(NOW.subtract({ minutes: 20 }));
 
     assert.equal(
-      toRoomSignal(eightMinutesOld, NOW, SENSORS.bedroom_netatmo.freshnessWindow).status,
-      'fresh',
+      toRoomSignal(twentyMinutesOld, NOW, SENSORS.bedroom_netatmo.freshnessWindow).status,
+      'stale',
     );
     assert.equal(
-      toRoomSignal(eightMinutesOld, NOW, SENSORS.bedroom_tado.freshnessWindow).status,
-      'stale',
+      toRoomSignal(twentyMinutesOld, NOW, SENSORS.bedroom_tado.freshnessWindow).status,
+      'fresh',
     );
   });
 });

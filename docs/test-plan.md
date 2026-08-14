@@ -57,9 +57,12 @@ read as sentences.
 - `measured_at` slightly in the future (small clock skew) → still `fresh`, not an error
 - `received_at` is irrelevant: a reading received one second ago but measured an hour ago is
   `stale`
-- **same reading, two windows, two verdicts** — 8 minutes old is `fresh` for Netatmo (15 min
-  window) and `stale` for Tado (90 s window). One test that demonstrates the whole per-source
-  design.
+- **same reading, two windows, two verdicts** — 20 minutes old is `stale` for Netatmo (15 min
+  window, two of its 7–8 minute refreshes) and `fresh` for Tado (25 min window, one 20-minute
+  heartbeat plus a poll interval). One test that demonstrates the whole per-source design.
+  *Inverted 2026-08-14, with the Tado adapter: Tado's window was 90 seconds, a number that
+  assumed a poll produces a fresh value. The vendor's heartbeat is what decides, and it is the
+  longer of the two — so the example now runs the other way round.*
 
 ## `domain/precedence.ts`
 
@@ -183,20 +186,97 @@ readings so "what happened last night" is a dashboard question rather than a she
 - read-back after write disagrees with what was written → reported, not ignored
 - connection refused → the error propagates cleanly to the caller
 
-## `sources/tado.ts`, `sources/netatmo.ts`
+## `sources/netatmo.ts`
+
+*Split from a shared "the pull adapters" section on 2026-08-14, when the Tado adapter was built.
+The two vendors turned out to share a shape (a token file, a refusal, one retry) and to disagree
+on every detail of it — which refusal, whether the rotation is optional, how many rooms come back
+per request — so one list was describing neither.*
 
 - vendor payload maps to `Reading[]` with the right kinds and canonical units
-- **the vendor's timestamp becomes `measured_at`**, not the time we polled
-- **Netatmo's expired-token answer — 403 with `error.code` 3 — → token refresh, then one retry.**
+- **the vendor's timestamp becomes `measured_at`**, not the time we polled — and it arrives in
+  epoch *seconds*, so the factor of a thousand is pinned; off by it, every reading dates from 1970
+- **the expired-token answer — 403 with `error.code` 3 — → token refresh, then one retry.**
   The status and the code both matter: the fixture used to say 401, which no real response ever
   carries, so the case passed while the adapter could not refresh against the live API
   (2026-08-14)
 - a 403 with any other code → reported as itself, no refresh, no retry
 - vendor 500 → returns an error; does not throw into the collector
 - malformed payload → error, and nothing partial is stored
-- **Netatmo polled twice inside its 7–8 minute refresh returns the same reading, and the second
+- the rotated refresh token is persisted before the new access token is used, and the *next*
+  refresh sends the rotated one
+- no token anywhere → the error names `/auth/netatmo`, and zero requests are made
+- **polled twice inside its 7–8 minute refresh returns the same reading, and the second
   poll stores nothing** — the idempotency constraint absorbs it for free. Nice demonstration that
   the dedup design pays for itself outside the push path.
+
+## `sources/tado.ts`
+
+*Written before the adapter, 2026-08-14. Two facts shape the list, and both were measured rather
+than assumed: the refusal is a plain **401** (curl against the live API with a garbage bearer
+token), and access tokens live **10 minutes**, so refreshing is the hot path — roughly every tenth
+poll — rather than the rare one. Tado rotates its refresh token on every refresh and the old one
+is revoked immediately, so a lost rotation is a lockout within the hour.*
+
+Mapping:
+
+- a zone-states payload maps to `Reading[]` with the right kinds, canonical units (°C and %RH need
+  no conversion) and the `sourceId` config maps that zone to
+- **each datapoint keeps its own timestamp.** `insideTemperature.timestamp` and
+  `humidity.timestamp` are independent instants — one is not allowed to stand in for the other —
+  and `received_at` is the poll's `now`
+- fields the adapter has no vocabulary for (`fahrenheit`, `precision`, `setting`,
+  `activityDataPoints`) are present in the fixtures and dropped
+
+The conversation:
+
+- **discovery happens once per process**: `GET /me` for the home id, then `GET /homes/{id}/zones`;
+  every later poll is one `GET /homes/{id}/zoneStates` and nothing else
+- an account with zero or several homes → throws naming what it found. One home is an assumption,
+  so it is an assumption that fails loudly
+- the bearer token rides every data request
+- **a 401 → refresh, then exactly one retry of the same request** — the conversation asserted in
+  order. A second 401 throws ("rejected an access token it just issued") rather than looping
+- the auth parameters ride the **query string of a body-less POST**, which is what Tado accepts
+- refresh answer with no `refresh_token` → throws naming the credential loss. Unlike Netatmo's,
+  where the field is optional, a Tado answer without the replacement means the one we sent has
+  just been revoked and nothing replaced it
+- `invalid_grant` → the error points at `/auth/tado`
+- no token file → the error names `/auth/tado`, and zero requests are made
+- the rotation is persisted **before** the new access token is used, and the next refresh sends
+  the rotated one; a persist that fails (read-only directory) is logged and the readings still
+  come back
+
+Many zones, one answer — what is skipped and what is fatal:
+
+- **skipped silently, other zones still land**: a mapped zone missing from the answer, or a zone
+  with absent or empty `sensorDataPoints` (hot water measures nothing). These are the vendor
+  *declaring* it has nothing to say, and the honest report of the gap is `/api/state` turning that
+  room stale against its own window — a line per skipped zone per poll would be 1,440 a day for one
+  flat battery and would say nothing the state endpoint does not. **The silence is asserted**, not
+  just the readings
+- **`link.state` is not one of those cases, because nothing reads it.** A well-formed datapoint is
+  a reading whatever the field says — `ONLINE`, `DISCONNECTED`, a word Tado has not invented yet, or
+  nothing at all — and that is table-driven, because it is a decision rather than an accident. The
+  first build skipped anything that was not `CONNECTED`, a value from the reference client's types
+  that no real answer carries, and it silently dropped every reading in the flat (2026-08-14).
+  Freshness is judged on the vendor's timestamp; a second opinion about reachability is a second
+  switch for one question
+- **fatal, nothing partial stored**: the envelope is not what we think it is, or a datapoint that
+  is present carries wrong-typed innards (`celsius` not a number, a timestamp that does not
+  parse). A malformed payload could mean *we* are misreading the API, and storing the zones that
+  happened to parse would mask it
+- **a `zoneStates` that is a list is refused by name**, and this one is not defensive
+  bookkeeping: `states['1']` on a list is its *second* element, so a list would half-work and file
+  every zone's readings under the neighbouring instrument's name. Silent, permanent, and the exact
+  mistake the "relocating a sensor means a new id" convention exists to prevent
+- reconciliation logs, at discovery and **only there** — once per process, where the per-poll
+  skips are silent: a configured zone the API does not offer names every zone it *did* offer (id,
+  name, type — fixing config is then copy-paste from the log); an unmapped `HEATING` zone gets a
+  line of its own, so a new radiator is never silently invisible; an unmapped `HOT_WATER` zone is
+  ignored in silence. Neither log stops the mapped zones polling
+- **polled twice inside the 20-minute heartbeat, the second poll stores nothing** — same
+  demonstration as Netatmo's, and the reason the poll interval can stay at one minute
 
 ## `sources/collector.ts`
 
@@ -245,6 +325,26 @@ readings so "what happened last night" is a dashboard question rather than a she
   check is the CSRF defence and stays; the wall-clock deadline on top of it guarded against
   nothing any caller does, and only its own test ever consumed it.*
 
+*Added 2026-08-14, with the Tado onboarding route. Tested against the assembled server for the
+same reason the Netatmo pair is — the mounting is then covered too:*
+
+- **`/auth/tado` is one route, not a pair.** The device flow has no callback: the vendor never
+  calls us, so the page polls. A `<meta http-equiv="refresh">` at the interval Tado asked for
+  drives **exactly one token poll per page load** — asserted, because a client-side loop is how
+  a 429 happens
+- a first GET starts a flow: the query carries `client_id` and `scope=offline_access`, and the
+  page carries the verification link, the user code and the meta refresh
+- reloading while the flow is pending polls once more and shows the same code
+- `authorization_pending` → keep waiting; `slow_down` → the interval grows by 5 s (RFC 8628) and
+  the page says so
+- granted → the refresh token lands in the token file (asserted through `loadRefreshToken`), the
+  success page carries **no** meta refresh, and the flow is cleared
+- `access_denied` → 400, the flow cleared, and the next GET starts a fresh one
+- the code expires two ways and both give a fresh code: the clock advanced past the vendor's
+  `expires_in`, and Tado answering `expired_token`
+- an unexpected status → 502 carrying the body; unconfigured (no `TADO_TOKEN_PATH`) → 503 naming
+  the variable, not a 404 that reads as a typo in the URL
+
 *Added 2026-08-12, with the log store:*
 
 - `GET /api/logs` serves the stored log over the default last-day window, ISO in and out, and
@@ -261,6 +361,19 @@ readings so "what happened last night" is a dashboard question rather than a she
   **Done for the Daphne, 2026-08-11:** read 50%, wrote 70%, read back 70%, wrote 50%, read back
   50% — first attempt, against the unit in the flat. That is the check a fake stream cannot make,
   and it is a one-off by design: a suite that needs the hardware powered on is a suite nobody runs.
+
+  **Done for Tado, 2026-08-14:** authorised through `/auth/tado` against the real account —
+  approved on the fourth poll of the waiting page — then one poll produced `tado: 6 readings, 6 new`
+  and all three rooms answered `/api/state` under the right sourceIds. Twelve minutes of running
+  then carried it through a real token expiry: the poll at 08:13 refused, refreshed and retried
+  without a log line or a missed reading, which is the one path a fake stream cannot honestly
+  exercise and the one whose failure mode is a lockout within the hour.
+
+  That session is also what corrected two things no fake could have: every zone id in `TADO_ZONES`
+  (the placeholders were wrong in all three entries) and `link.state`, which is `ONLINE` and not the
+  `CONNECTED` the fixtures had been asserting happily. **The fixtures in `tado.test.ts` are now
+  copies of that real payload**, down to the expired-token body, which is the only reason they are
+  worth anything.
 - **Wall-clock timing.** Nothing sleeps. Freshness and every range window are tested by passing
   different values of `now`.
 - **SQLite itself.** We test our queries and constraints, not the engine's.

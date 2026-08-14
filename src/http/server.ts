@@ -18,14 +18,17 @@ import { resolveSignal } from '../domain/precedence.ts';
 import type { RoomSignal } from '../domain/signal.ts';
 import { parseInstant, toIsoUtc } from '../domain/time.ts';
 import { createNetatmoAuthRoutes } from './netatmo-auth.ts';
-import type { FetchLike, NetatmoSettings } from '../sources/netatmo.ts';
+import { createTadoAuthRoutes } from './tado-auth.ts';
+import type { NetatmoSettings } from '../sources/netatmo.ts';
+import type { FetchLike } from '../sources/source.ts';
+import type { TadoSettings } from '../sources/tado.ts';
 import type { LogLine, LogStore } from '../store/logs.ts';
 import type { ReadingStore } from '../store/readings.ts';
 
 /**
  * The read API and the two open writes (fan level, ingest) — uniform JSON,
- * end to end. The Netatmo onboarding pair, the API's human-facing half, lives
- * in netatmo-auth.ts and is mounted whole below. Routes are declared on Hono
+ * end to end. The vendor onboarding routes, the API's human-facing half, live
+ * in netatmo-auth.ts and tado-auth.ts and are mounted whole below. Routes are declared on Hono
  * and served through `getRequestListener`, so this still returns an ordinary
  * `node:http` Server and nothing that wires or tests it knows a framework is
  * underneath.
@@ -43,9 +46,10 @@ import type { ReadingStore } from '../store/readings.ts';
  * write endpoints are open on the LAN"). What any caller can do is bounded by
  * construction: 20-80, never off, never above the grille ceiling.
  *
- * Time arrives through `clock`, so every test runs against a fixed instant.
- * `fetchImpl` exists for the onboarding module's token exchange and passes
- * straight through to it — a canned Netatmo in the tests, `fetch` in main.
+ * Time arrives through `clock`, so every test runs against a fixed instant —
+ * and the Tado onboarding route needs it for a second reason: a device code has
+ * a deadline. `fetchImpl` exists for the onboarding modules' token exchanges and
+ * passes straight through to them — a canned vendor in the tests, `fetch` in main.
  */
 
 const DAY = Temporal.Duration.from({ hours: 24 });
@@ -64,6 +68,9 @@ export interface ApiServerDependencies {
    * onboarding routes save the token where the poller reads it. Unset
    * disables the two /auth/netatmo routes, with an explanation. */
   readonly netatmoAuth: NetatmoSettings | undefined;
+  /** The same, for Tado — one identity per vendor, each shared with its poller.
+   * Unset disables /auth/tado, with an explanation. */
+  readonly tadoAuth: TadoSettings | undefined;
   readonly clock: () => Temporal.Instant;
   readonly log: (line: string) => void;
 }
@@ -252,9 +259,16 @@ export function createApiServer(
     return c.json(outcome);
   });
 
-  // Mounted at '/' so both full paths stay declared — and greppable — where
+  // Mounted at '/' so every full path stays declared — and greppable — where
   // the routes live. Errors thrown inside still land in app.onError above.
+  // One onboarding module per vendor, because the two flows have nothing in
+  // common but their purpose: Netatmo redirects and is called back, Tado hands
+  // out a code and waits to be asked.
   app.route('/', createNetatmoAuthRoutes(dependencies.netatmoAuth, dependencies.log, fetchImpl));
+  app.route(
+    '/',
+    createTadoAuthRoutes(dependencies.tadoAuth, dependencies.log, dependencies.clock, fetchImpl),
+  );
 
   function latestReadingsFrom(ranked: readonly SensorId[], kind: MeasurementKind): Reading[] {
     const readings: Reading[] = [];

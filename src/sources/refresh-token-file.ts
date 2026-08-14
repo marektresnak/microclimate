@@ -2,19 +2,21 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /**
- * Where the Netatmo refresh token lives: one JSON file on disk, deliberately
- * not the database.
+ * Where a vendor's refresh token lives: one JSON file on disk, deliberately not
+ * the database. One file per vendor, named by the `path` the caller passes.
  *
- * Netatmo rotates the refresh token on every refresh, so *something* mutable
- * has to hold the current one — and the database is append-only on purpose,
- * with no mutable row in it at all (see CLAUDE.md's data-model section). A file
- * also keeps a live credential out of every database backup: the readings are
- * worth copying around, a secret is not. `data/` is gitignored, so it cannot be
- * committed.
+ * Both vendors we poll rotate the refresh token on every refresh, so *something*
+ * mutable has to hold the current one — and the database is append-only on
+ * purpose, with no mutable row in it at all (see CLAUDE.md's data-model
+ * section). A file also keeps a live credential out of every database backup:
+ * the readings are worth copying around, a secret is not. `data/` is gitignored,
+ * so it cannot be committed.
  *
- * Shared by the adapter (reads it before every refresh, writes the rotation)
- * and the OAuth callback (writes the first token), which is why it is its own
- * module rather than living inside either.
+ * Shared by each adapter (reads it before every refresh, writes the rotation)
+ * and each onboarding route (writes the first token), which is why it is its own
+ * module rather than living inside either. It was `netatmo-token.ts` until
+ * 2026-08-14; Tado needed the identical thing, down to the corrupt-file rule, so
+ * the module lost the vendor from its name rather than gaining a copy.
  */
 
 export function loadRefreshToken(path: string): string | undefined {
@@ -22,16 +24,18 @@ export function loadRefreshToken(path: string): string | undefined {
   try {
     text = readFileSync(path, 'utf8');
   } catch (error) {
-    // No file yet is the normal first-run state, before /auth/netatmo has been
-    // visited. Anything else — permissions, IO — is a real failure to surface.
+    // No file yet is the normal first-run state, before the vendor's onboarding
+    // page has been visited. Anything else — permissions, IO — is a real
+    // failure to surface.
     if (isFileMissing(error)) return undefined;
     throw error;
   }
 
   // A corrupt file throws rather than returning undefined: undefined means
-  // "fall back to the seed token from the environment", and after the first
-  // rotation that seed is stale — using it silently is a lockout wearing a
-  // fallback's clothes.
+  // "there is no token here", which the caller answers either by falling back
+  // to a stale environment seed or by asking for a fresh authorisation. Both
+  // are worse than saying what is actually wrong, and the first is a lockout
+  // wearing a fallback's clothes.
   const parsed: unknown = JSON.parse(text);
   if (parsed === null || typeof parsed !== 'object') {
     throw new Error(`${path} does not hold an object`);

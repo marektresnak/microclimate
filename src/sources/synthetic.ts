@@ -73,12 +73,12 @@ export function createSyntheticNetatmo(): SensorSource {
   };
 }
 
-// The valves read differently because they sit in different places. The offsets
-// are what makes the never-average rule visible in the demo output.
+// One entry per Tado zone, and the offsets are what makes the never-average
+// rule visible in the demo output: the bedroom valve reads well below the Home
+// Coach standing across the room from it, and precedence has to pick one.
 const VALVES: readonly { readonly id: SensorId; readonly temperatureOffset: number }[] = [
   { id: 'living_room_tado', temperatureOffset: 0 },
-  { id: 'kids_room_tado_left', temperatureOffset: 0.8 },
-  { id: 'kids_room_tado_right', temperatureOffset: -0.6 },
+  { id: 'kids_room_tado', temperatureOffset: 0.8 },
   { id: 'bedroom_tado', temperatureOffset: -1.4 },
 ];
 

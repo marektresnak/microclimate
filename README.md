@@ -4,9 +4,10 @@ Collects readings from the sensors in my flat, stores them, exposes them over a 
 and sets the HRV (heat-recovery ventilation) unit's fan level over Modbus when asked to.
 
 > **Status.** The collection platform is built and tested — config and domain types, freshness,
-> precedence, the SQLite store, the batch ingest endpoint, the Netatmo adapter with its OAuth
-> onboarding, the Modbus TCP client, and the JSON API. The Tado adapter is not built; see
-> [Not built yet](#not-built-yet).
+> precedence, the SQLite store, the batch ingest endpoint, both pull adapters (Netatmo and Tado)
+> with their OAuth onboarding pages, the Modbus TCP client, and the JSON API. What is left is the
+> push hardware and the automation; see [Not built yet](#not-built-yet). Both adapters have been
+> run against the real vendors, and the Modbus client against the real unit.
 >
 > **Nothing moves the fan automatically — yet.** An automation driving the unit from CO₂ is the
 > intention, and a first implementation existed. It was removed rather than shipped: every
@@ -16,8 +17,9 @@ and sets the HRV (heat-recovery ventilation) unit's fan level over Modbus when a
 > [`a75fba3`](https://github.com/marektresnak/microclimate/tree/a75fba33d1969e072f918b45944595cb0659f160).
 >
 > `npm start` collects from synthetic sensors into a real store, serves the API, and lets you
-> drive a recording fake unit. Set `HRV_MODBUS_HOST` to drive the real one, and the Netatmo
-> credentials to poll the real Home Coach instead of the synthetics.
+> drive a recording fake unit. Set `HRV_MODBUS_HOST` to drive the real one; set the Netatmo
+> credentials or `TADO_TOKEN_PATH` to poll that vendor's real instruments instead of the
+> synthetics — one switch per vendor, and the synthetics stand in only while neither is set.
 
 ## The problem
 
@@ -42,7 +44,7 @@ functions — time arrives as a parameter, nothing reads a clock or a database:
 |---|---|---|
 | [`src/domain/precedence.ts`](src/domain/precedence.ts) | ~65 lines | which instrument answers for a room |
 | [`src/domain/freshness.ts`](src/domain/freshness.ts) | ~35 lines | whether a reading still counts |
-| [`src/config.ts`](src/config.ts) | ~120 lines | the whole topology |
+| [`src/config.ts`](src/config.ts) | ~145 lines | the whole topology |
 | [`src/ingest/http.ts`](src/ingest/http.ts) | ~155 lines | batch ingest: what lands, what is refused, and why |
 
 If you want to see the code that talks to hardware rather than the code that decides, read
@@ -56,19 +58,21 @@ Then the tests, which are meant to read as sentences:
 - [`tests/ingest.test.ts`](tests/ingest.test.ts) — what is accepted, refused, and deduplicated,
   and why a replayed backlog is welcome at any age
 
-Around 2,600 lines of source and 3,000 of tests. Two runtime dependencies — `hono` and its Node
+Around 3,600 lines of source and 3,900 of tests. Two runtime dependencies — `hono` and its Node
 adapter, serving the API — admitted late and deliberately; everything else is Node built-ins.
 
 ## Four decisions worth knowing before you read
 
-**Freshness is per source, never global.** A 30-second-old Tado reading and a 6-minute-old
-Netatmo reading are both fine; one staleness window cannot judge both. Freshness is always
-judged on when the instrument measured, never on when the reading arrived.
+**Freshness is per source, never global.** A 20-minute-old Tado reading is healthy — that is how
+often a valve publishes when nothing changes — while a Netatmo silent that long has missed two
+refreshes. One staleness window cannot judge both. Freshness is always judged on when the
+instrument measured, never on when the reading arrived.
 
 **Two instruments are never averaged.** Precedence is an ordered list per (room, kind) and the
-first fresh source wins. The kids' room has two valves next to different radiators that disagree
-by a degree and a half; a mean belongs to neither. Every consumer of room-level values resolves
-them through the same one function, so two views disagreeing is impossible by construction.
+first fresh source wins. The bedroom has a Tado valve head on the radiator and a Netatmo Home
+Coach across the room; they disagree by a degree and a half, and a mean belongs to neither. Every
+consumer of room-level values resolves them through the same one function, so two views
+disagreeing is impossible by construction.
 
 **`measured_at` and `received_at` are never conflated.** Netatmo hands over readings minutes
 after taking them, and a push node replaying a buffered backlog delivers hours-old readings in
@@ -105,7 +109,11 @@ curl localhost:3000/api/unit/level                  # where the fan actually is
 curl -X POST localhost:3000/api/unit/level \
   -H 'content-type: application/json' -d '{"level":50}'
 open http://localhost:3000/auth/netatmo             # one-time Netatmo authorisation
+open http://localhost:3000/auth/tado                # one-time Tado authorisation
 ```
+
+Both onboarding pages exist so no refresh token is ever pasted by hand: each vendor rotates its
+token on every refresh, so the file the page writes is the only copy that stays true.
 
 ```sh
 npm test       # typechecks first, then node:test — no framework
@@ -119,7 +127,6 @@ the air. A suite that runs green without a typecheck would not notice the guard 
 
 ## Not built yet
 
-- **The Tado adapter.** `SensorSource` is the seam; `sources/synthetic.ts` stands in.
 - **The SEN66 push nodes.** The ingest endpoint is live and tested; the hardware is not built.
 - **The CO₂ automation.** See the status note up top — it returns designed against real
   readings, and the commit that carries the first implementation is linked there.

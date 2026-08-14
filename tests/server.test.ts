@@ -13,8 +13,10 @@ import { resolveSignal } from '../src/domain/precedence.ts';
 import { toIsoUtc } from '../src/domain/time.ts';
 import { createApiServer } from '../src/http/server.ts';
 import type { ApiServerDependencies } from '../src/http/server.ts';
-import type { FetchLike, NetatmoSettings } from '../src/sources/netatmo.ts';
-import { loadRefreshToken } from '../src/sources/netatmo-token.ts';
+import type { NetatmoSettings } from '../src/sources/netatmo.ts';
+import { loadRefreshToken } from '../src/sources/refresh-token-file.ts';
+import type { FetchLike } from '../src/sources/source.ts';
+import type { TadoSettings } from '../src/sources/tado.ts';
 import { openLogStore } from '../src/store/logs.ts';
 import type { LogStore } from '../src/store/logs.ts';
 import { openReadingStore } from '../src/store/readings.ts';
@@ -48,6 +50,9 @@ function onTheWire(source: Reading): Record<string, unknown> {
 
 interface RecordedRequest {
   readonly url: string;
+  readonly method: string;
+  // Netatmo's exchange carries a form body; Tado's parameters ride the URL, and
+  // the tests below read them off `url` instead.
   readonly form: URLSearchParams | undefined;
 }
 
@@ -62,6 +67,7 @@ function scriptedFetch(script: ScriptStep[]): { impl: FetchLike; requests: Recor
   const impl: FetchLike = async (input, init) => {
     requests.push({
       url: String(input),
+      method: init?.method ?? 'GET',
       form: init?.body instanceof URLSearchParams ? init.body : undefined,
     });
 
@@ -79,6 +85,9 @@ function scriptedFetch(script: ScriptStep[]): { impl: FetchLike; requests: Recor
 
 interface Overrides {
   readonly netatmoAuth?: NetatmoSettings | undefined;
+  readonly tadoAuth?: TadoSettings | undefined;
+  /** A clock a test can move, for the one flow with a deadline in it. */
+  readonly clock?: () => Temporal.Instant;
   readonly script?: ScriptStep[];
 }
 
@@ -88,6 +97,9 @@ interface TestServer {
   readonly logs: LogStore;
   readonly unit: FakeVentilationUnit;
   readonly tokenPath: string;
+  /** One file per vendor, kept apart here so a test cannot pass by writing the
+   * other vendor's token. */
+  readonly tadoTokenPath: string;
   readonly requests: RecordedRequest[];
 }
 
@@ -95,7 +107,9 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
   const store = openReadingStore(':memory:');
   const logs = openLogStore(':memory:');
   const unit = createFakeUnit(40);
-  const tokenPath = join(mkdtempSync(join(tmpdir(), 'server-')), 'token.json');
+  const directory = mkdtempSync(join(tmpdir(), 'server-'));
+  const tokenPath = join(directory, 'netatmo-token.json');
+  const tadoTokenPath = join(directory, 'tado-token.json');
   const fake = scriptedFetch(overrides.script ?? []);
 
   const dependencies: ApiServerDependencies = {
@@ -108,6 +122,7 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
       redirectUri: 'http://flat.local:3000/auth/netatmo/callback',
       tokenPath,
     },
+    tadoAuth: { tokenPath: tadoTokenPath },
     clock: () => NOW,
     log: () => undefined,
     ...overrides,
@@ -127,6 +142,7 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
       logs,
       unit,
       tokenPath,
+      tadoTokenPath,
       requests: fake.requests,
     });
   } finally {
@@ -137,6 +153,38 @@ async function withServer(overrides: Overrides, run: (context: TestServer) => Pr
     store.close();
     logs.close();
   }
+}
+
+/** Tado's device-flow answers. The vendor never calls us back, so onboarding is
+ * this page asking these questions — see http/tado-auth.ts. */
+function deviceCode(code: string): ScriptStep {
+  const userCode = code.toUpperCase();
+  return {
+    status: 200,
+    json: {
+      device_code: code,
+      user_code: userCode,
+      verification_uri: 'https://login.tado.com/oauth2/device',
+      verification_uri_complete: `https://login.tado.com/oauth2/device?user_code=${userCode}`,
+      expires_in: 300,
+      interval: 5,
+    },
+  };
+}
+
+function tadoRefusal(error: string): ScriptStep {
+  return { status: 400, json: { error } };
+}
+
+function tadoGrant(): ScriptStep {
+  return {
+    status: 200,
+    json: { access_token: 'access-1', refresh_token: 'tado-refresh-1', token_type: 'bearer', expires_in: 599 },
+  };
+}
+
+function pathsOf(requests: readonly RecordedRequest[]): string[] {
+  return requests.map((request) => new URL(request.url).pathname);
 }
 
 function postLevel(baseUrl: string, body: string): Promise<Response> {
@@ -219,7 +267,7 @@ describe('the http server', () => {
 
       // Every configured sensor appears, and isActive travels with each entry —
       // nothing is filtered on it, so a retired instrument stays interpretable.
-      for (const sensorId of ['living_room_tado', 'kids_room_tado_left', 'kids_room_tado_right', 'bedroom_tado', 'bedroom_netatmo']) {
+      for (const sensorId of ['living_room_tado', 'kids_room_tado', 'bedroom_tado', 'bedroom_netatmo']) {
         assert.match(text, new RegExp(`"${sensorId}"`));
       }
       assert.match(text, /"isActive":true/);
@@ -229,21 +277,23 @@ describe('the http server', () => {
 
   it('expands room history to every source config puts in the room', async () => {
     await withServer({}, async ({ baseUrl, store }) => {
-      const left = reading('kids_room_tado_left', 'temperature', 22.3, NOW.subtract({ minutes: 2 }));
-      const right = reading('kids_room_tado_right', 'temperature', 21.1, NOW.subtract({ minutes: 1 }));
-      const elsewhere = reading('bedroom_tado', 'temperature', 20.0, NOW.subtract({ minutes: 1 }));
-      store.insert([left, right, elsewhere]);
+      // The bedroom is the room with two instruments in it, so it is the one
+      // where "expands to every source" has something to expand.
+      const coach = reading('bedroom_netatmo', 'temperature', 22.3, NOW.subtract({ minutes: 2 }));
+      const valve = reading('bedroom_tado', 'temperature', 23.8, NOW.subtract({ minutes: 1 }));
+      const elsewhere = reading('kids_room_tado', 'temperature', 20.0, NOW.subtract({ minutes: 1 }));
+      store.insert([coach, valve, elsewhere]);
 
       const from = toIsoUtc(NOW.subtract({ minutes: 10 }));
-      const response = await fetch(`${baseUrl}/api/rooms/kids_room/readings?from=${from}&to=${toIsoUtc(NOW)}`);
+      const response = await fetch(`${baseUrl}/api/rooms/bedroom/readings?from=${from}&to=${toIsoUtc(NOW)}`);
 
       assert.equal(response.status, 200);
       assertDeepEqual(await response.json(), {
-        room: 'kids_room',
+        room: 'bedroom',
         from,
         to: toIsoUtc(NOW),
-        // Both valves, in measured order; the bedroom reading stays out.
-        readings: [onTheWire(left), onTheWire(right)],
+        // Both instruments, in measured order; the kids-room reading stays out.
+        readings: [onTheWire(coach), onTheWire(valve)],
       });
     });
   });
@@ -527,6 +577,135 @@ describe('the http server', () => {
 
       assert.equal(response.status, 503);
       assert.match(JSON.stringify(await response.json()), /NETATMO_CLIENT_ID/);
+    });
+  });
+
+  it('hands out a Tado device code, and a page that polls at the vendor’s interval', async () => {
+    await withServer({ script: [deviceCode('code-1')] }, async ({ baseUrl, requests }) => {
+      const response = await fetch(`${baseUrl}/auth/tado`);
+      const page = await response.text();
+
+      assert.equal(response.status, 200);
+      const asked = new URL(requests[0]?.url ?? '');
+      assert.equal(requests[0]?.method, 'POST');
+      assert.equal(asked.pathname, '/oauth2/device_authorize');
+      // Without offline_access the grant carries no refresh token, and the
+      // whole point of authorising once is a token that outlives this page.
+      assert.equal(asked.searchParams.get('scope'), 'offline_access');
+      assert.notEqual(asked.searchParams.get('client_id'), null);
+
+      // The meta refresh IS the polling mechanism, set to Tado's own interval.
+      assert.match(page, /<meta http-equiv="refresh" content="5">/);
+      assert.match(page, /login\.tado\.com\/oauth2\/device\?user_code=CODE-1/);
+    });
+  });
+
+  it('polls Tado exactly once per page load', async () => {
+    const script = [deviceCode('code-1'), tadoRefusal('authorization_pending'), tadoRefusal('authorization_pending')];
+
+    await withServer({ script }, async ({ baseUrl, requests }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+      const reload = await fetch(`${baseUrl}/auth/tado`);
+      await fetch(`${baseUrl}/auth/tado`);
+
+      // One request per load and no loop anywhere — Tado has historically rate
+      // limited clients that poll harder than they were told to.
+      assertDeepEqual(pathsOf(requests), ['/oauth2/device_authorize', '/oauth2/token', '/oauth2/token']);
+      // Still the same code: waiting is not starting over.
+      assert.match(await reload.text(), /CODE-1/);
+    });
+  });
+
+  it('saves the refresh token once the code is approved, and stops polling', async () => {
+    const script = [deviceCode('code-1'), tadoGrant(), deviceCode('code-2')];
+
+    await withServer({ script }, async ({ baseUrl, tadoTokenPath, requests }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+      const granted = await fetch(`${baseUrl}/auth/tado`);
+      const page = await granted.text();
+
+      assert.equal(granted.status, 200);
+      assert.equal(loadRefreshToken(tadoTokenPath), 'tado-refresh-1');
+      // No meta refresh on the success page: an answer must not become a loop.
+      assert.ok(!page.includes('http-equiv="refresh"'), page);
+
+      const poll = new URL(requests[1]?.url ?? '');
+      assert.equal(poll.searchParams.get('grant_type'), 'urn:ietf:params:oauth:grant-type:device_code');
+      assert.equal(poll.searchParams.get('device_code'), 'code-1');
+
+      // The flow is cleared, so the next visit starts a new one rather than
+      // polling a code that has already been spent.
+      await fetch(`${baseUrl}/auth/tado`);
+      assert.equal(pathsOf(requests)[2], '/oauth2/device_authorize');
+    });
+  });
+
+  it('backs off five seconds when Tado says slow down', async () => {
+    const script = [deviceCode('code-1'), tadoRefusal('slow_down')];
+
+    await withServer({ script }, async ({ baseUrl }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+      const slower = await fetch(`${baseUrl}/auth/tado`);
+
+      // RFC 8628's answer to slow_down, and the page carries the new rhythm.
+      assert.match(await slower.text(), /<meta http-equiv="refresh" content="10">/);
+    });
+  });
+
+  it('shows the refusal when the Tado approval is denied, and starts again after it', async () => {
+    const script = [deviceCode('code-1'), tadoRefusal('access_denied'), deviceCode('code-2')];
+
+    await withServer({ script }, async ({ baseUrl }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+      const denied = await fetch(`${baseUrl}/auth/tado`);
+
+      assert.equal(denied.status, 400);
+      assert.match(await denied.text(), /refused/);
+
+      const again = await fetch(`${baseUrl}/auth/tado`);
+      assert.match(await again.text(), /CODE-2/);
+    });
+  });
+
+  it('starts a fresh code when the old one has expired, however it learns that', async () => {
+    // Our own clock says so...
+    let now = NOW;
+    await withServer({ clock: () => now, script: [deviceCode('code-1'), deviceCode('code-2')] }, async ({ baseUrl }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+      now = NOW.add({ minutes: 6 }); // the code was good for 300 seconds
+
+      assert.match(await (await fetch(`${baseUrl}/auth/tado`)).text(), /CODE-2/);
+    });
+
+    // ...or Tado does, which is the same answer arriving the other way round.
+    const script = [deviceCode('code-3'), tadoRefusal('expired_token'), deviceCode('code-4')];
+    await withServer({ script }, async ({ baseUrl }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+
+      assert.match(await (await fetch(`${baseUrl}/auth/tado`)).text(), /CODE-4/);
+    });
+  });
+
+  it('reports a Tado answer it has no rule for, rather than waiting on it forever', async () => {
+    const script = [deviceCode('code-1'), { status: 500, json: { errors: [{ code: 'internalError' }] } }];
+
+    await withServer({ script }, async ({ baseUrl }) => {
+      await fetch(`${baseUrl}/auth/tado`);
+      const unexpected = await fetch(`${baseUrl}/auth/tado`);
+
+      assert.equal(unexpected.status, 502);
+      assert.match(await unexpected.text(), /internalError/);
+    });
+  });
+
+  it('says what is missing when Tado onboarding is not configured', async () => {
+    await withServer({ tadoAuth: undefined }, async ({ baseUrl, requests }) => {
+      const response = await fetch(`${baseUrl}/auth/tado`);
+
+      assert.equal(response.status, 503);
+      assert.match(JSON.stringify(await response.json()), /TADO_TOKEN_PATH/);
+      // Nothing asked of Tado: there would be nowhere to put the answer.
+      assert.equal(requests.length, 0);
     });
   });
 });
