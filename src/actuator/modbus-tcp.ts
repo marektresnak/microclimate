@@ -92,10 +92,33 @@ const WRITE_SINGLE_REGISTER = 0x06;
 // TEACHING: a device signals a refusal by setting the top bit of the function
 // code in its reply: 0x06 becomes 0x86. `code & 0x80` is how you detect it.
 const EXCEPTION_FLAG = 0x80;
+// The MBAP header is fixed-width, so every field sits at a known byte. These
+// names are the diagram at the top of this file written down, and both the
+// building and the reading side go through them — a byte position should never
+// appear as a bare number at a call site.
+const TRANSACTION_ID_OFFSET = 0;
+const PROTOCOL_ID_OFFSET = 2;
+const MBAP_LENGTH_OFFSET = 4;
+const UNIT_ID_OFFSET = 6;
+
 // TEACHING: transaction id (2) + protocol id (2) + length (2) + unit id (1).
 const MBAP_HEADER_BYTES = 7;
-// TEACHING: where the length field starts, i.e. byte 4 of the header.
-const MBAP_LENGTH_OFFSET = 4;
+// Every MBAP field except the unit id is two bytes wide. Only this one needs a
+// name, because reassembly has to know where the length field ends.
+const MBAP_LENGTH_BYTES = 2;
+
+// The PDU starts where the header ends, so this is the same seven. Two names
+// because they are two different things: one is how long the header is, the
+// other is where the function code lives, and only the second belongs in an
+// index.
+const FUNCTION_CODE_OFFSET = MBAP_HEADER_BYTES;
+// Everything after the function code — the exception code on a refusal, the
+// register data otherwise.
+const PDU_BODY_OFFSET = FUNCTION_CODE_OFFSET + 1;
+
+// Written on the way out, checked on the way in. Always zero over Modbus TCP,
+// which makes it a tripwire rather than information.
+const PROTOCOL_ID = 0;
 // One unit id plus the largest PDU Modbus allows.
 //
 // TEACHING: 254 = 1 + 253, and the 253 is a fossil. A serial Modbus RTU frame
@@ -265,11 +288,11 @@ export function createModbusUnit(
     async read() {
       // TEACHING: FC3 asks "give me N registers starting at address A", so the
       // PDU is [function code, address hi, address lo, count hi, count lo].
-      // We want exactly one register, hence `toBigEndian(1)`.
+      // We want exactly one register, hence `toBigEndianBytes(1)`.
       const request = buildFrame(nextTransactionId(), options.unitId, [
         READ_HOLDING_REGISTERS,
-        ...toBigEndian(FAN_SPEED_REGISTER),
-        ...toBigEndian(1),
+        ...toBigEndianBytes(FAN_SPEED_REGISTER),
+        ...toBigEndianBytes(1),
       ]);
 
       // TEACHING: `body` is everything after the function code. For FC3 that is
@@ -284,7 +307,7 @@ export function createModbusUnit(
       // TEACHING: offset 1 skips the byte count. 500 / 10 = 50, and `toLevel`
       // then checks 50 is one of the nine levels the unit can actually be at —
       // so a register holding 555 (55.5%) becomes an error rather than a lie.
-      const raw = fromBigEndian(body, 1);
+      const raw = readBigEndianUint16(body, 1);
       const level = toLevel(raw / PERCENT_SCALE);
       if (level === undefined) {
         throw new Error(`the unit reported register value ${raw}, which is not a level`);
@@ -301,8 +324,8 @@ export function createModbusUnit(
       // last two bytes.
       const request = buildFrame(nextTransactionId(), options.unitId, [
         WRITE_SINGLE_REGISTER,
-        ...toBigEndian(FAN_SPEED_REGISTER),
-        ...toBigEndian(value),
+        ...toBigEndianBytes(FAN_SPEED_REGISTER),
+        ...toBigEndianBytes(value),
       ]);
 
       // FC6 echoes back the register and the value it wrote. A disagreeing echo
@@ -316,8 +339,8 @@ export function createModbusUnit(
         throw new Error(`expected the register and value echoed back, the unit sent a ${body.length}-byte body`);
       }
 
-      const echoedRegister = fromBigEndian(body, 0);
-      const echoedValue = fromBigEndian(body, 2);
+      const echoedRegister = readBigEndianUint16(body, 0);
+      const echoedValue = readBigEndianUint16(body, 2);
 
       if (echoedRegister !== FAN_SPEED_REGISTER || echoedValue !== value) {
         throw new Error(
@@ -342,14 +365,16 @@ export function createModbusUnit(
 function buildFrame(transactionId: number, unitId: number, pdu: readonly number[]): Uint8Array {
   const frame = new Uint8Array(MBAP_HEADER_BYTES + pdu.length);
 
-  frame.set(toBigEndian(transactionId), 0); // bytes 0-1
-  frame.set(toBigEndian(0), 2); // bytes 2-3, protocol id: always zero
+  frame.set(toBigEndianBytes(transactionId), TRANSACTION_ID_OFFSET);
+  frame.set(toBigEndianBytes(PROTOCOL_ID), PROTOCOL_ID_OFFSET);
   // TEACHING: the length field counts what FOLLOWS it — the unit id (1 byte)
-  // plus the PDU. Hence `+ 1`. Getting this wrong is the classic Modbus bug:
-  // the device waits forever for bytes you never promised to send.
-  frame.set(toBigEndian(pdu.length + 1), MBAP_LENGTH_OFFSET); // bytes 4-5
-  frame[6] = unitId; // byte 6
-  frame.set(pdu, MBAP_HEADER_BYTES); // bytes 7 onward
+  // plus the PDU. Hence `+ 1`. Forgetting it is the classic Modbus bug, because
+  // "length" reads as the PDU's length and the unit id being counted is the
+  // surprise: declare the PDU alone and the device consumes a PDU one byte
+  // short, leaving our last byte to be read as the start of the next frame.
+  frame.set(toBigEndianBytes(pdu.length + 1), MBAP_LENGTH_OFFSET);
+  frame[UNIT_ID_OFFSET] = unitId;
+  frame.set(pdu, MBAP_HEADER_BYTES);
 
   return frame;
 }
@@ -365,42 +390,42 @@ function readAnswer(
   unitId: number,
 ): Uint8Array {
   // (1) Long enough to contain a header and a function code at all.
-  if (response.length < MBAP_HEADER_BYTES + 1) {
+  if (response.length < PDU_BODY_OFFSET) {
     throw new Error(`the unit sent ${response.length} bytes, too short to be a frame`);
   }
 
   // (2) It answers OUR question. Without this, a late reply to the previous
   // request could be accepted as the answer to this one — which for a read
   // means reporting a stale fan level as current.
-  const asked = fromBigEndian(request, 0);
-  const answered = fromBigEndian(response, 0);
+  const asked = readBigEndianUint16(request, TRANSACTION_ID_OFFSET);
+  const answered = readBigEndianUint16(response, TRANSACTION_ID_OFFSET);
   if (answered !== asked) {
     throw new Error(`answer to transaction ${answered}, but we asked ${asked}`);
   }
 
   // The one header field that carried no check. It is always zero over TCP, so
   // anything else means this is not a Modbus TCP frame at all.
-  const protocol = fromBigEndian(response, 2);
-  if (protocol !== 0) {
+  const protocol = readBigEndianUint16(response, PROTOCOL_ID_OFFSET);
+  if (protocol !== PROTOCOL_ID) {
     throw new Error(`answer carries protocol id ${protocol}, but Modbus TCP is always 0`);
   }
 
   // (4) From the device we addressed, not another one behind the same gateway.
-  if (response[6] !== unitId) {
-    throw new Error(`answer from unit ${String(response[6])}, but we asked unit ${unitId}`);
+  if (response[UNIT_ID_OFFSET] !== unitId) {
+    throw new Error(`answer from unit ${String(response[UNIT_ID_OFFSET])}, but we asked unit ${unitId}`);
   }
 
   // TEACHING: indexing a Uint8Array can yield `undefined` under this project's
   // `noUncheckedIndexedAccess` setting, so it has to be handled rather than
   // assumed. In practice check (1) already guarantees this byte exists.
-  const code = response[MBAP_HEADER_BYTES];
+  const code = response[FUNCTION_CODE_OFFSET];
   if (code === undefined) throw new Error('the unit sent a frame with no function code');
 
   // TEACHING: (5a) the refusal case. The device set the top bit of the function
   // code and appended one byte saying why (2 = "bad address", 3 = "bad value",
   // and so on). This is the device *talking*, so it must not be retried.
   if ((code & EXCEPTION_FLAG) !== 0) {
-    const reason = response[MBAP_HEADER_BYTES + 1] ?? 0;
+    const reason = response[PDU_BODY_OFFSET] ?? 0;
     throw new Error(`the unit refused the request with Modbus exception ${reason}`);
   }
 
@@ -414,7 +439,7 @@ function readAnswer(
   // TEACHING: hand back only the part the caller cares about — everything after
   // the function code. `slice` copies; `subarray` would return a view onto the
   // same memory, which is a subtle way to leak a buffer.
-  return response.slice(MBAP_HEADER_BYTES + 1);
+  return response.slice(PDU_BODY_OFFSET);
 }
 
 // TEACHING: the request/response cycle over one already-open stream. Wrapped in
@@ -481,18 +506,19 @@ function sendAndWait(
 // of 65535 means waiting out the whole budget for bytes that will never arrive,
 // while buffering whatever does — and then retrying the same garbage.
 function completeFrame(received: Uint8Array): Uint8Array | undefined {
-  // TEACHING: 6 bytes — we cannot even read the length field until the first six
-  // have arrived, since it occupies bytes 4 and 5.
-  if (received.length < MBAP_HEADER_BYTES - 1) return undefined;
+  // TEACHING: we cannot even read the length field until the bytes it occupies
+  // have arrived — bytes 4 and 5, so six in all.
+  const bytesThroughLengthField = MBAP_LENGTH_OFFSET + MBAP_LENGTH_BYTES;
+  if (received.length < bytesThroughLengthField) return undefined;
 
-  const declared = fromBigEndian(received, MBAP_LENGTH_OFFSET);
+  const declared = readBigEndianUint16(received, MBAP_LENGTH_OFFSET);
   if (declared > MAX_MBAP_LENGTH) {
     throw new Error(`the answer declares ${declared} bytes, more than a Modbus frame can hold`);
   }
 
-  // TEACHING: the length field counts bytes after itself, and it ends at byte 5 —
-  // so the total frame size is 6 plus whatever it declares.
-  const total = MBAP_LENGTH_OFFSET + 2 + declared;
+  // TEACHING: the length field counts bytes after itself, so the total frame
+  // size is everything through that field plus whatever it declares.
+  const total = bytesThroughLengthField + declared;
   // TEACHING: anything beyond `total` is left alone. On a one-request connection
   // there should be nothing, and if there is, it is not ours to interpret.
   return received.length < total ? undefined : received.slice(0, total);
@@ -502,13 +528,25 @@ function completeFrame(received: Uint8Array): Uint8Array | undefined {
 //   21001 = 0x5209 → [0x52, 0x09]
 //   `>> 8` shifts the high byte down into position; `& 0xff` keeps only the
 //   lowest eight bits, discarding anything above.
-function toBigEndian(value: number): readonly number[] {
+//
+// A tuple rather than `number[]` because the arity is load-bearing and nothing
+// else states it: every offset in `buildFrame` is spaced two bytes apart
+// precisely because this returns two. A third element would still produce a
+// well-formed frame — the length field is computed from `pdu.length` — with
+// every field after it silently shifted, which is the worst shape a bug can
+// take here.
+function toBigEndianBytes(value: number): readonly [number, number] {
   return [(value >> 8) & 0xff, value & 0xff];
 }
 
-// TEACHING: the inverse — two bytes back into a number.
+// TEACHING: the other direction — the two bytes at `offset` back into a number.
 //   [0x01, 0xf4] → (0x01 << 8) | 0xf4 = 256 + 244 = 500
-function fromBigEndian(bytes: Uint8Array, offset: number): number {
+//
+// Not a strict mirror of the above, which is why the names are not a matched
+// pair either: this reads a two-byte window out of a whole frame rather than
+// handing back a standalone one, so it takes an offset and has to defend
+// against the frame ending inside the field it was asked for.
+function readBigEndianUint16(bytes: Uint8Array, offset: number): number {
   const high = bytes[offset];
   const low = bytes[offset + 1];
 
