@@ -1,6 +1,6 @@
 import { connect } from 'node:net';
 
-import { assertCommandedLevel, toLevel } from '../domain/level.ts';
+import { toLevel } from '../domain/level.ts';
 import type { CommandedLevel } from '../domain/level.ts';
 import type { VentilationUnit } from './unit.ts';
 
@@ -293,16 +293,7 @@ export function createModbusUnit(
     },
 
     async set(level: CommandedLevel) {
-      // The runtime half of the type, at the one place a level stops being a
-      // TypeScript union and becomes two bytes on a wire. Type stripping checks
-      // nothing, and the intake grille cannot pass the air above the ceiling.
-      //
-      // TEACHING: `CommandedLevel` is a compile-time-only guarantee. Node strips
-      // types without checking them, so at runtime this function would happily
-      // accept 100 from any JavaScript caller. `assertCommandedLevel` is the
-      // same guarantee expressed in a way that survives to runtime.
-      const checked = assertCommandedLevel(level);
-      const value = checked * PERCENT_SCALE;
+      const value = level * PERCENT_SCALE;
 
       // TEACHING: FC6 is [function code, address hi, address lo, value hi,
       // value lo] — same shape as the read request, different meaning for the

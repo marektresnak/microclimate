@@ -117,9 +117,15 @@ files ahead. I review each before the next starts.
 types without ever checking them, so nothing at runtime enforces `CommandedLevel` — and
 `CommandedLevel` is the entire guard against commanding 90 or 100 into a restricted intake grille.
 A suite that runs green without a typecheck is a suite that would not notice the guard had gone.
-The Modbus adapter carries a runtime range assertion at the write site for the same reason: the
-one place where a number leaves the type system and becomes bytes on a wire deserves a belt as
-well as braces.
+
+**The guard is narrowed once, at the edge, and nowhere else (2026-08-13).** `POST /api/unit/level`
+is the only way a level enters this process from outside, and `assertCommandedLevel` stands there —
+so by the time a level reaches `VentilationUnit.set()` it has already been checked, and the adapter
+and the fake both carried a second assertion that no reachable path could fire. That reversed an
+earlier "belt as well as braces" at the Modbus write site. Two runtime checks of one value is two
+places to keep in agreement and one type whose signature says `CommandedLevel` while its body says
+it does not believe it. The narrowing belongs where the untrusted number arrives, not where the
+trusted one leaves.
 
 Runtime dependencies: **two** — `hono` and `@hono/node-server`, admitted 2026-08-12 for the
 HTTP layer — `http/server.ts` and the onboarding module it mounts, `http/netatmo-auth.ts` —

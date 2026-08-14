@@ -136,14 +136,6 @@ describe('writing a level', () => {
     assertDeepEqual(Array.from((fake.sent[1] ?? []).slice(0, 2)), [0x00, 0x02]);
   });
 
-  it('refuses a level above the ceiling even with the types stripped', async () => {
-    const fake = fakeStreams(echo);
-    const bypassingTheTypes: { set(level: number): Promise<void> } = unitOver(fake);
-
-    await assert.rejects(bypassingTheTypes.set(100), /not a commandable level/);
-    assertDeepEqual(fake.sent, []);
-  });
-
   it('does not report success when the unit echoes something else', async () => {
     // Believing a level the unit never took is worse than an error: the loop
     // would carry on deciding from a number that is not real.

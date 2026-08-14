@@ -32,13 +32,4 @@ describe('the fake unit', () => {
     await assert.rejects(unit.set(50), /modbus write/);
     assertDeepEqual(unit.commands, []);
   });
-
-  it('refuses a level above the ceiling even when the types have been stripped', async () => {
-    // Reachable only from JavaScript that skipped the typecheck — which is every
-    // run of the service, since Node strips types rather than compiling them.
-    const unit = createFakeUnit(40);
-    const bypassingTheTypes: { set(level: number): Promise<void> } = unit;
-
-    await assert.rejects(bypassingTheTypes.set(100), /not a commandable level/);
-  });
 });

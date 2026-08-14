@@ -1,4 +1,3 @@
-import { assertCommandedLevel } from '../domain/level.ts';
 import type { CommandedLevel, Level } from '../domain/level.ts';
 import type { VentilationUnit } from './unit.ts';
 
@@ -35,13 +34,8 @@ export function createFakeUnit(startLevel: Level = 40): FakeVentilationUnit {
     async set(level) {
       if (unit.failWrites) throw new Error('modbus write timed out');
 
-      // The same runtime range check the Modbus adapter carries at its write
-      // site. Type stripping performs no checking, so the one place a level
-      // stops being a type and becomes bytes deserves a belt as well as braces.
-      const checked = assertCommandedLevel(level);
-
-      commands.push(checked);
-      unit.level = checked;
+      commands.push(level);
+      unit.level = level;
     },
   };
 
