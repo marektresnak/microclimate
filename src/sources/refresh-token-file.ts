@@ -7,8 +7,8 @@ import { dirname } from 'node:path';
  *
  * Both vendors we poll rotate the refresh token on every refresh, so *something*
  * mutable has to hold the current one — and the database is append-only on
- * purpose, with no mutable row in it at all (see CLAUDE.md's data-model
- * section). A file also keeps a live credential out of every database backup:
+ * purpose, with no mutable row in it at all (see CLAUDE.md, "Rules the data
+ * keeps"). A file also keeps a live credential out of every database backup:
  * the readings are worth copying around, a secret is not. `data/` is gitignored,
  * so it cannot be committed.
  *

@@ -13,6 +13,33 @@ provenance, timestamps and units are designed for a reader that does not exist y
 away with an accurate picture of it. Small, obvious, well-tested, defensible line by line. If a
 change makes the codebase harder to explain to someone coming to it fresh, it is the wrong change.
 
+This file holds the rules, and the facts that cost a live session to learn. The reasoning that
+spans files lives beside it:
+
+| | |
+|---|---|
+| [`README.md`](README.md) | What it is and how to run it. |
+| [`docs/sensors.md`](docs/sensors.md) | Both vendors, and where the freshness windows and poll intervals come from. |
+| [`docs/storage.md`](docs/storage.md) | The schema, the service log, topology-in-config, the retention design. |
+| [`docs/api.md`](docs/api.md) | The endpoints, the wire format, and the ingest and auth arguments. |
+| [`docs/architecture.md`](docs/architecture.md) | The module map, the two dependencies, and why there is no framework. |
+| [`docs/test-plan.md`](docs/test-plan.md) | Per-module test strategy and conventions. |
+
+---
+
+## Commands
+
+```sh
+npm start          # fake unit, API on :3000, whichever vendors .env configures
+npm test           # tsc --noEmit first, then node:test
+npm run typecheck
+```
+
+**Never run `node --test` on its own.** Type stripping deletes the types without ever checking
+them, so nothing at runtime enforces `CommandedLevel` — and `CommandedLevel` is the entire guard
+against commanding 90 or 100 into a restricted intake grille. A suite that runs green without a
+typecheck would not notice the guard had gone.
+
 ---
 
 ## Where reasoning lives
@@ -23,12 +50,28 @@ never the one you are looking at.
 | | |
 |---|---|
 | **Code comment** | The constraint an edit *at this line* would violate. Must be within eyeshot of what it defends. |
-| **This document** | Rules, decisions that span files, and measurements that cost a live session to get. |
+| **This document** | Rules, and measurements that cost a live session to get. |
+| **`docs/`** | Decisions and arguments that span files. |
 | **README** | What it is and how to run it. |
 | **Git** | What it used to be. |
 
 Before writing a sentence anywhere, apply the deletion test: *if I cut this, what wrong thing
 becomes possible?* No answer, no sentence.
+
+**Do not restate a constant, a type, or a file tree in this document.** A number lives at the
+constant that owns it; what belongs here is the property the number has to keep. Every duplicated
+value is a future contradiction with a straight face.
+
+**A rule whose argument lives in `docs/` needs a pointer here only when breaking it would not touch
+a line that carries the reason.** Most do touch one — the append-only rule is argued in
+`store/readings.ts`, per-source freshness in `config.ts`, the ingest verdicts in `ingest/http.ts` —
+and a reader editing those lines cannot miss it. The exceptions are the decisions that start from
+no existing line: a new sensor, a new endpoint, the rollup, an automation. Those get a **Before …,
+read …** line at the point where the decision starts. Apart from the index above, that is the only
+place this document sends a reader elsewhere.
+
+When a section moves, the pointers aimed at it are part of the move:
+`grep -rn "CLAUDE.md\|docs/" src tests docs` names every one.
 
 ---
 
@@ -50,6 +93,11 @@ carrying it is
 level, watch CO₂ settle, log it — the service log records every level set over the API next to the
 CO₂ curve it explains. When a stretch of real readings exists, the automation returns as a pure
 function reading from the same store. The collector is its polling step already in place.
+
+**Before building the automation — or a dashboard, or a second actuator — read
+[`docs/architecture.md`](docs/architecture.md)** — the seams that make each of them additive
+already exist, which is why none of them justifies a rule engine, a plugin loader, an automation
+registry, or an event bus.
 
 ---
 
@@ -100,93 +148,30 @@ ahead. I review each before the next starts.
 
 ---
 
-## Runtime and dependencies
+## Runtime
 
-**Node 26 or later, and it must be an official nodejs.org build** (developed on 26.7.0 via nvm;
-`.nvmrc` says so). Chosen so that four things need no flags and no build step:
+**Node 26 or later, and it must be an official nodejs.org build.** Homebrew compiles its node
+without Temporal (it conflicts with their shared ICU library), so `src/temporal-guard.ts` — the
+first import in `main.ts` — refuses to start with a sentence naming the fix instead of dying on a
+bare `ReferenceError`. The version buys four things with no flag and no build step: `node:sqlite`,
+native type stripping, `node:test`, and `Temporal`. TypeScript is only ever run `--noEmit`, and is
+pinned to 6 because it is the first release whose `lib` knows Temporal.
 
-- `node:sqlite` is built in — no `better-sqlite3`, therefore no native compilation.
-- TypeScript type-stripping is native — no `tsc` build, no bundler. `tsc` is used only for
-  `--noEmit`. TypeScript 6, the first line whose `lib` knows Temporal.
-- `node:test` + `node:assert/strict` — no vitest, no jest.
-- **`Temporal` is built in.** Every instant in the domain is a `Temporal.Instant` and every tunable
-  span a `Temporal.Duration`, so an instant, a duration and a fan level are three different types
-  rather than three numbers.
+**Every instant in the domain is a `Temporal.Instant` and every tunable span a
+`Temporal.Duration`**, so an instant, a duration and a fan level are three different types rather
+than three numbers. Spans become numbers only at the platform's door — `setTimeout`,
+`AbortSignal.timeout` — one `total()` call at the top of the module that owns the timer.
 
-**The build matters, not only the version.** Homebrew compiles its node without Temporal (it
-conflicts with their shared ICU library), so `src/temporal-guard.ts` — the first import in
-`main.ts` — refuses to start with a sentence naming the fix instead of dying on a bare
-`ReferenceError`.
+**Anything needing a local hour reads `TIME_ZONE` from `config.ts`** (the flat's IANA zone), never
+the host's clock configuration. Temporal handles the DST transitions; a fixed offset would not.
 
-**`npm test` runs `tsc --noEmit` first, and that is not a convenience.** Type stripping deletes the
-types without ever checking them, so nothing at runtime enforces `CommandedLevel` — and
-`CommandedLevel` is the entire guard against commanding 90 or 100 into a restricted intake grille.
-A suite that runs green without a typecheck would not notice the guard had gone.
-
-**The guard is narrowed once, at the edge, and nowhere else.** `POST /api/unit/level` is the only
-way a level enters this process from outside, and `assertCommandedLevel` stands there. Do not add
-a second check at the Modbus write site: two runtime checks of one value is two places to keep in
-agreement, and one type whose signature says `CommandedLevel` while its body says it does not
-believe it.
-
-Runtime dependencies: **two** — `hono` and `@hono/node-server`, for the HTTP layer. Both are pure
-JavaScript with no transitive dependencies, no native code and no install scripts; the adapter
-exists only because Hono speaks web-standard Request/Response and Node does not. The bar for any
-further dependency: something I would have to defend line by line, admitted only when it absorbs
-boilerplate rather than decisions. That is why the framework stops at routing, body plumbing and
-the onboarding pages' HTML escaping, while every narrowing, the OAuth state and the precedence rule
-remain this project's own code.
-
-Everything else is built in: `fetch`, `node:http` underneath the adapter, `node:sqlite`,
-`node:test`.
+**Runtime dependencies are `hono` and `@hono/node-server`, and a third needs asking.** The bar:
+something that absorbs boilerplate rather than decisions. That is why the framework stops at
+routing, body plumbing and the onboarding pages' HTML escaping, while every narrowing, the OAuth
+state and the precedence rule remain this project's own code.
 
 **Modbus is hand-rolled**, not a library. We need exactly two function codes against a documented
-register map. A general Modbus library is several thousand lines of protocol we do not use. The
-minimal client is ~100 lines, fully testable against a fake socket, and is a better thing to read.
-
----
-
-## The physical setup
-
-Three rooms. Sensors are pulled from vendor APIs today; custom nodes will push later.
-
-| Room | Sensors today | Planned |
-|---|---|---|
-| `living_room` | 1× Tado valve (temperature, humidity) | SEN66 |
-| `kids_room` | 2× Tado valve on two radiators — **one zone, one reading** | SEN66 |
-| `bedroom` | 1× Tado valve + Netatmo Home Coach (temperature, humidity, **CO₂**) | SEN66 |
-
-- **Tado** — pull adapter, ported from `~/dev/tado-monitor` (mine, polling this same account).
-  Temperature and humidity **per zone, not per valve**: a zone reports one `sensorDataPoints`, so
-  the readable instrument is the zone and the kids' room's two valves are one reading.
-
-  Auth is the RFC 8628 device flow and **there is no client secret** — the client id is public and
-  hardcoded in the adapter. Tado removed the password grant on 2025-03-04, so this is not one
-  option among several. `/auth/tado` runs it.
-
-  **Access tokens live 10 minutes and the refresh token is single-use**, so refreshing is the hot
-  path here — roughly every tenth poll, where Netatmo's is a three-hourly event. A lost rotation is
-  a lockout within the hour.
-
-  **A healthy reading can be 20 minutes old.** A valve measures every minute, but the published
-  value only moves when a reading crosses a threshold (~0.5 °C or 5 %RH), with a 20-minute
-  heartbeat regardless. The 25-minute freshness window is derived from that; the derivation is at
-  the constant in `config.ts`.
-
-  **One poll is one request for the whole flat**: `GET /homes/{id}/zoneStates`, after a one-time
-  discovery of the home id and the zone list.
-- **Netatmo Home Coach** — pull, OAuth refresh flow, `gethomecoachsdata`. Temperature, humidity,
-  CO₂. Reference: `~/dev/netatmo-sync` (mine, working). **Netatmo only refreshes every 7–8 minutes
-  on their side.** Polling it faster gains nothing.
-- **SEN66** — Sensirion nine-in-one node (PM1, PM2.5, PM4, PM10, temperature, humidity, VOC index,
-  NOx index, CO₂) over I²C behind an ESP32, pushing JSON to us. Not built yet; the ingest endpoint
-  and a simulator script stand in.
-- **Tado thermostats are read-only to us.** We collect their values. We never control heating.
-
-**Because sources publish at wildly different rates, freshness is per-source, not global.** A
-20-minute-old Tado reading is healthy — that is its heartbeat — while a Netatmo that has said
-nothing for 20 minutes has missed two refreshes and is not. One global staleness window cannot
-judge both, in either direction. This is a load-bearing design constraint, not a detail.
+register map. A general Modbus library is several thousand lines of protocol we do not use.
 
 ---
 
@@ -205,7 +190,7 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
   *visible* — `GET /api/unit/level` reads the unit live — but not recorded, because nothing polls
   the unit.
 
-**Protocol details**, every one confirmed against the real unit:
+**Protocol facts**, every one confirmed against the real unit:
 
 | | |
 |---|---|
@@ -215,84 +200,33 @@ A **2VV Daphne** HRV unit with heat recovery, controlled over **Modbus TCP**.
 | Value encoding | percent × 10 — `400` means 40% |
 | Set | FC6, write single register |
 | Read back | FC3, read holding registers |
-| Timeouts | 5 s per attempt, 3 retries, 250 ms between |
 
 **The register is 21001, not the 21002 the documentation gives.** The usual Modbus convention
 clash: documentation numbers registers from 1, the wire numbers them from 0. **This is not a bug
 and must not be "corrected".** A comment at the call site says so.
 
-The timing numbers are chosen in `main.ts` and argued at the constants there. Two properties they
-have to keep: the 5 seconds is one budget per attempt covering *connecting as well as answering*,
-and the pause between attempts is long enough that a retry is genuinely a second try.
+The timeout, retry count and retry pause live in `main.ts` and are argued at those constants. Two
+properties they have to keep: the attempt budget covers *connecting as well as answering*, and the
+pause between attempts is long enough that a retry is genuinely a second try.
 
-Because FC3 reads back successfully, **the current level is observable**, which is how a wall-panel
-change stays visible.
-
-Because the readable and commandable ranges genuinely differ, they are two types:
-
-```ts
-// What the unit can report. A wall-panel user can put it at 90 or 100.
-export type Level = 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100;
-
-// What we are ever allowed to send. See the intake-grille limit above.
-export type CommandedLevel = 20 | 30 | 40 | 50 | 60 | 70 | 80;
-```
-
+**Read and command ranges genuinely differ, so they are two types** — `Level` (what the unit can
+report, including a wall-panel 90) and `CommandedLevel` (what we may send) in `domain/level.ts`.
 `CommandedLevel` is assignable to `Level` with no conversion, so `read()` returns `Level` and
-`set()` accepts only `CommandedLevel`. **Commanding 90 is a compile error, not a runtime check
-someone has to remember to write.**
+`set()` accepts only `CommandedLevel`, and **commanding 90 is a compile error rather than a runtime
+check someone has to remember to write.**
 
-Both are plain literal unions — anything arriving from outside goes through a narrowing function.
+**The runtime guard is narrowed once, at the edge, and nowhere else.** `POST /api/unit/level` is
+the only way a level enters this process from outside, and `assertCommandedLevel` stands there. Do
+not add a second check at the Modbus write site: two runtime checks of one value is two places to
+keep in agreement, and one type whose signature says `CommandedLevel` while its body says it does
+not believe it.
 
 ---
 
-## Data model and storage
+## Rules the data keeps
 
-**One table of readings.** Every reading is a fact that was true at a point in time, from a named
-instrument. (The service log is a second table, below.)
-
-```sql
-CREATE TABLE readings (
-  source_id       TEXT    NOT NULL,   -- which instrument, not which room
-  kind            TEXT    NOT NULL,   -- TEXT so a new measurement never needs a migration
-  value           REAL    NOT NULL,   -- always the canonical unit for that kind
-  measured_at     INTEGER NOT NULL,   -- epoch ms, UTC. when the instrument took it
-  received_at     INTEGER NOT NULL,   -- epoch ms, UTC. when we learned about it
-  measured_at_iso TEXT GENERATED ALWAYS AS
-    (strftime('%Y-%m-%dT%H:%M:%fZ', measured_at / 1000.0, 'unixepoch')) VIRTUAL,
-  UNIQUE (source_id, kind, measured_at)
-) STRICT;
-```
-
-**No `room_id` column.** The room is a property of the instrument, and the app knows the
-room → sources mapping from config. **The dedup index doubles as the query index** —
-`(source_id, kind, measured_at)` is exactly the prefix a room-history query matches on, verified
-against the query plan by a test. No second index, no denormalised column.
-
-**`UNIQUE (source_id, kind, measured_at)` with `INSERT OR IGNORE`.** Push nodes retry, and a
-retried batch must be a no-op. Duplicates in a metrics store do not announce themselves; they
-surface months later as spikes in a graph.
-
-**Stored timestamps are integer epoch milliseconds, UTC.** Not ISO text, and the reason is narrow:
-`measured_at` is part of a uniqueness constraint, so it must have exactly one representation per
-instant. `2026-08-09T13:45:30+02:00` and `2026-08-09T11:45:30Z` are the same moment and different
-strings, and the constraint would not catch the duplicate. The `measured_at_iso` generated column
-costs zero storage and makes `SELECT *` readable, so nothing is given up.
-
-**That argument is about the column and does not reach the wire.** The API speaks ISO 8601 in both
-directions and **no epoch millisecond is visible anywhere in it**. Between the two edges the code
-carries `Temporal.Instant` and `Temporal.Duration`. `domain/time.ts` is the whole wire conversion;
-the store modules hold the only `epochMilliseconds` conversions, at the SQL boundary.
-
-**`measured_at` and `received_at` are never conflated.** Netatmo readings arrive minutes after they
-were taken, and a push node replaying a buffered backlog can deliver hours-old readings in one
-request. Collapsing the two makes historical graphs quietly wrong and makes staleness detection
-impossible — **freshness is always judged on `measured_at`**.
-
-**IDs are TEXT, not integer foreign keys.** Roughly 20 MB across the raw table, buying a `SELECT *`
-that is readable without a join. At this scale that is the right trade.
-
-**Canonical units, fixed:**
+**Canonical units, fixed.** Never store a value in anything else; conversion happens in the
+adapter, at the edge.
 
 | Kind | Unit |
 |---|---|
@@ -302,288 +236,82 @@ that is readable without a join. At this scale that is the right trade.
 | `pm1`, `pm2_5`, `pm4`, `pm10` | µg/m³ |
 | `voc_index`, `nox_index` | Sensirion index, 1–500 |
 
-Never store a value in anything else. Conversion happens in the adapter, at the edge.
+- **Every table is append-only. There is no mutable row in the database at all.** A row is written
+  once, so nothing in the file can be half-updated and any backup is consistent by construction.
+  The property is load-bearing: the one thing that genuinely must mutate — each vendor's refresh
+  token — lives in a file precisely so the database does not have to give this up.
+- **`measured_at` and `received_at` are never conflated**, and **freshness is always judged on
+  `measured_at`.** Readings arrive minutes to hours after they were taken.
+- **Freshness is per source, never global.** A 20-minute-old Tado reading is healthy — that is its
+  heartbeat — while a Netatmo silent for 20 minutes has missed two refreshes and is not. One
+  global window cannot judge both, in either direction. This is a load-bearing design constraint,
+  not a detail.
+- **Never average two instruments.** Precedence is an ordered list per `(room, kind)` and the first
+  fresh source wins. The bedroom's Tado valve head sits on the radiator and reads warm, the Netatmo
+  stands across the room, and a mean describes neither.
+- **Store everything, control on a subset.** All nine SEN66 measurements are persisted even though
+  only CO₂ will drive the unit. Collection is the point of the system — do not "optimise" the
+  unused kinds away.
+- **Sensors are never deleted from `config.ts`**; decommissioning means dropping them from the
+  precedence lists and setting `isActive: false`. **The precedence lists are the only thing that
+  decides who is consulted** — do not add a second switch.
+- **Relocating a sensor means a new sensor id.** Editing the room of an existing id retroactively
+  relabels every historical reading. This is the one mistake that is tempting and irreversible.
+- **Nothing prunes.** There is no code path that deletes a reading, and there is not to be one
+  until the rollup it must derive from exists.
 
-**Store everything, control on a subset.** All nine SEN66 measurements are persisted even though
-only CO₂ will drive the unit. Collection is the point of the system — do not "optimise" the unused
-kinds away.
+**Before adding a sensor or a vendor, read [`docs/sensors.md`](docs/sensors.md)** — the freshness
+window and the poll interval come from an inequality against how that vendor publishes, not from
+taste, and a rotating credential has a settled home.
 
-**Every table is append-only. There is no mutable row in the database at all.** A row is written
-once, so nothing in the file can be half-updated and any backup is consistent by construction. The
-property is load-bearing: the one thing that genuinely must mutate — each vendor's refresh token —
-lives in a file precisely so the database does not have to give this up.
+**Before building the rollup or anything that deletes a row, read
+[`docs/storage.md`](docs/storage.md)** — the prune has to derive from the rollup table rather than
+from a clock, and getting that backwards destroys data permanently and silently.
 
-## The service log — the second table, deliberately
+---
 
-Every line the `log` seam carries — poll failures, store failures, ingest verdicts, fan commands —
-goes to stdout **and**, best-effort, into a `logs` table in the same database file.
-`GET /api/logs` serves it back, so "what happened last night" is a dashboard question rather than
-one needing a login to the machine.
+## Rules the API keeps
 
-- **Append-only**, like everything else in the file.
-- **stdout first, the table write best-effort.** When SQLite itself is what is broken, the database
-  cannot carry the news of its own outage, and a logging failure must never take down the work it
-  was narrating.
-- **No severity column.** The lines carry no level, and a taxonomy invented for a few hundred lines
-  a day serves no consumer. If a dashboard later needs to filter errors, the column arrives
-  together with every call site classified, not before.
-- **No dedup, no uniqueness constraint.** Nothing retries a log line; two identical lines a minute
-  apart are two events. The range index is therefore explicit, where the readings table gets its
-  own free from the dedup constraint.
-- **Nothing prunes it.** Tens of megabytes a year at current volume.
+- **Every instant on the wire is an ISO 8601 string, in and out. Epoch milliseconds never appear.**
+  Out: UTC with milliseconds. In: an explicit zone, `Z` or an offset.
+- **A zone-less timestamp, a bare date, and an impossible date are all refused**, never guessed at.
+  Do not retreat to `Date.parse`, which rolls `2026-02-31` forward into March; tests pin the
+  rejections.
+- **Ranges are half-open: `from` included, `to` excluded.** Half-open windows are the only kind
+  that tile.
+- **`/api/state` reports `status` and `measuredAt`, and no age.** Two answers to one question is
+  one too many.
+- **Ingest is a batch, answers 200 whenever the batch was processed, with verdicts inside**, and
+  **one bad reading never sinks the batch**. A status a simple node reads as "retry" would have it
+  replaying poison forever.
+- **Reject future timestamps, accept any past one.** `INSERT OR IGNORE` already makes replay
+  idempotent at any age, and a buffered backlog is exactly what batching exists to carry.
+- **A valid kind the instrument does not declare is rejected**, not stored. **A CO₂ reading below
+  300 ppm is logged, never rejected** — it is the evidence of a drifted NDIR zero.
+- **Both write endpoints are open on the LAN, knowingly. Do not add auth inside this process, and
+  do not report its absence as a finding.** If exposure ever grows beyond the LAN, auth returns at
+  the edge, in front of the whole service, and never inside this process.
 
-The log is also the durable record of when the fan level changed over the API — `"70% set over the
-API"` next to the CO₂ curve it explains, which is half the axis the measurement campaign needs.
-Wall-panel changes stay invisible: the log records what the service did and was told, not what the
-panel did.
+**Before adding or changing an endpoint, read [`docs/api.md`](docs/api.md)** — it holds the current
+surface and the argument each rule above is the short form of.
 
-## Topology lives in config, not the database
-
-Rooms and sensors are declared in `config.ts` as an `as const` object. There is **no `rooms` or
-`sensors` table.** Config wins because it gives literal union types for `RoomId` and `SensorId` (a
-typo is a compile error, precedence lists are exhaustively checkable), because git records *why* a
-sensor moved and a database row never could, and because a mirrored table would need a startup
-reconciliation step that can drift.
-
-Two conventions make that safe for historical data:
-
-1. **Sensors are never deleted from config.** Decommissioning takes the sensor out of the
-   precedence lists and sets `isActive: false`. The entry stays forever so old readings remain
-   interpretable. Config describes the present; the readings table is a record of the past, and the
-   past needs its vocabulary kept.
-
-   **The precedence lists are the only thing that decides who is consulted.** `isActive` is
-   descriptive — it is what `/api/sensors` reports so a client can tell a retired instrument from a
-   live one, and `precedence.ts` does not look at it. Do not add a second switch: the ranked list
-   also says in what *order*, so it has to be edited anyway. A test asserts an inactive sensor is
-   never ranked anywhere, so a half-finished removal fails at the moment the mistake is made.
-2. **Relocating a sensor means a new sensor id.** Move a SEN66 from the bedroom to the kids' room
-   and you retire `bedroom_sen66` and add `kids_sen66` — same device, two identities. Editing the
-   room of an existing id would retroactively relabel every historical reading. This is the one
-   mistake that is tempting and irreversible.
-
-The database is not self-describing on its own. That is accepted: `GET /api/sensors` serves the
-config, and the config lives in git beside the database on the same server, so any backup that
-captures one captures the other.
-
-## Retention and rollups — designed, deliberately not built
-
-Target tiers: **raw at 30 s kept for 7 days**, rolled up to **15-minute buckets** beyond that.
-
-| Tier | Rows | Size |
-|---|---|---|
-| Raw, 7 days @ 30 s | ~709k | ~61 MB, steady state — never grows |
-| Rollup, 15 min | ~1.33M/year | ~106 MB/year |
-
-Ten years lands near 1.1 GB. Without rollups the raw table grows at ~3.2 GB/year, so this is
-roughly a 30× reduction. **Revisit at around six months of runtime**, well before it matters.
-
-When it is built:
-
-- Store `count`, `avg`, `min`, `max` per bucket, not just an average. For air quality the peak is
-  the interesting number — a CO₂ spike to 1400 for ten minutes vanishes into an hourly mean, and
-  that spike is exactly what you would go looking for.
-- Roll up **closed buckets only**, and make the upsert idempotent on
-  `(source_id, kind, bucket_start)` so recomputation is harmless.
-- **Prune strictly after the rollup succeeds, and only what the rollup actually contains.** Derive
-  the prune from the rollup table, never from a clock. A prune that runs when the rollup failed
-  silently destroys data permanently.
-
-Until the rollup exists, **nothing prunes**. There is no code path that deletes a reading.
-
-## Ingest
-
-`POST /api/readings` accepts a **batch**: one request carrying many readings, each with its own
-`measuredAt`. A SEN66 node reports nine measurements per cycle and must not make nine requests, and
-a node that buffered through a network outage replays its backlog with the original timestamps
-intact.
-
-`measuredAt` is an ISO 8601 instant with an explicit zone — the same grammar the range params take
-and the responses emit. **Epoch milliseconds are refused rather than guessed at**, so a node left
-on old firmware fails loudly instead of looking healthy while storing nothing.
-
-**Validate timestamps in one direction only: reject the future**, beyond about five minutes of
-clock skew. A node reporting 2106 would otherwise look eternally fresh and poison every decision
-downstream. The reject names the instant back — a node has to find the fault in its own clock, and
-its clock reads in dates.
-
-**Any past timestamp is accepted.** Rejecting old readings would discard exactly the buffered
-backlog that batching exists to carry: a node offline for twelve hours replays around 1,300
-batches, and any window shorter than the outage throws them all away. The past-side check also buys
-nothing, because `INSERT OR IGNORE` already makes replay idempotent at any age.
-
-Three rules the endpoint keeps:
-
-- **One bad reading does not sink the batch.** The valid readings land; each reject is reported
-  with its index and reason. A node cannot fix a bad reading by resending it, so failing the batch
-  holds eight good readings hostage to one bad one, forever. For the same reason the response is
-  **200 whenever the batch was processed**, verdicts inside — a status a simple node reads as
-  "retry" would have it replaying poison until the end of time.
-- **A valid kind the instrument does not declare is rejected**, not stored: `bedroom_netatmo`
-  claiming `pm2_5` is a wrong sourceId in node firmware, and storing it files one instrument's data
-  under another's name, permanently.
-- **A CO₂ reading below 300 ppm is logged, never rejected.** NDIR sensors self-calibrate by
-  assuming they periodically see outdoor air; a flat that never gets down to outdoor CO₂ will
-  drift. A drifted instrument is still reporting real air with a shifted zero, and the low reading
-  is the evidence of the fault — discarding it would hide the diagnosis.
-
-## The read API
-
-| Endpoint | Shape |
-|---|---|
-| `GET /api/state` | **Room-level.** One value per `(room, kind)`, each naming its source and freshness. |
-| `GET /api/rooms/:room/readings` | Room-level history — sources expanded from config, inactive ones included, `?from=&to=` (default last 24 h), `?kind=` to filter. |
-| `GET /api/sensors` | The config topology, so a client can interpret ids without reading files. |
-| `GET /api/sensors/:id/readings` | Per-instrument detail. |
-| `GET /api/logs` | The service log — the same lines stdout gets, `?from=&to=` (default last 24 h). |
-| `GET /api/unit/level` | The fan's actual level, read live over Modbus. |
-| `POST /api/unit/level` | Sets the fan. `assertCommandedLevel` refuses 90 and 100. |
-| `POST /api/readings` | Batch ingest for the push nodes. |
-| `GET /auth/netatmo` (+ `/callback`) | Netatmo OAuth onboarding, so no token is pasted by hand. |
-| `GET /auth/tado` | Tado device-flow onboarding. One route, no callback. |
-| `GET /health` | Liveness. |
-
-**Every instant in this API is an ISO 8601 string, in and out. Epoch milliseconds never appear.**
-
-- **Out: always UTC, always milliseconds** — `2026-08-12T09:36:00.000Z`, byte for byte what the
-  `measured_at_iso` generated column computes. Reading the database by hand and reading the API
-  give the same string.
-- **In: an ISO 8601 instant with an explicit zone**, `Z` or an offset. An offset is accepted and
-  normalised, so replay stays idempotent across two spellings of one moment and a node whose clock
-  reads in local time is not made to convert. The grammar is `Temporal.Instant.from`'s (RFC 9557),
-  so a space or lowercase separator, a bracketed zone annotation and the compact form all parse,
-  and sub-millisecond fractions truncate to the millisecond the store thinks in.
-- **A zone-less timestamp is refused**, not guessed at. It would mean different instants on the
-  server and on the machine that sent it, and would shift by an hour twice a year besides. A bare
-  date is refused for the same reason: one rule, spelled out in the error.
-- **A date that does not exist is refused.** Temporal rejects `2026-02-31` outright. Do not retreat
-  to `Date.parse`, which rolls an impossible day forward into March; tests pin the rejections.
-- **Ranges are half-open: `from` is included, `to` is not.** Half-open windows are the only kind
-  that tile — a client walking `00:00–06:00, 06:00–12:00` sees a reading measured exactly at 06:00
-  once. Counting it in both windows is the same quiet poison the ingest dedup exists to keep out.
-
-There is no range cap — single user, trusted LAN, accepted.
-
-**`/api/state` reports `status` and `measuredAt`, and no age.** The freshness judgement is made
-here, against that source's own window and this server's clock. Handing the client an age invites a
-second judgement against a clock that may not agree with ours, and two answers to one question is
-one too many. Anyone who wants to plot the gap has `measuredAt`.
-
-**Both write endpoints are open on the LAN, knowingly. Do not add auth inside this process, and do
-not report its absence as a finding.** The acceptance:
-
-- For the **fan endpoint**, the residual attacker on a trusted LAN is a web page inside someone's
-  browser — CSRF, which a `text/plain` form body gets past JSON-only parsing — and nothing pulls a
-  hostile 80 back down. Everything such a caller can do is bounded by construction: 20 to 80, never
-  off, never above the grille ceiling. The harm ceiling is a noisy night, accepted by the person
-  who sleeps there.
-- The **ingest endpoint** carries the sharper risk: a poisoned reading outlives its request — it
-  sits in the store, skews history and the measurement campaign — and the day an automation drives
-  the fan from CO₂, invented bedroom readings steer it from anything on the network. Accepted with
-  the same posture, same bounded actuator underneath.
-
-If exposure ever grows beyond the LAN or tailnet, auth returns **at the edge** (a tunnel with SSO
-in front of the whole service), not inside this process. There is no `INGEST_TOKEN`; the SEN66
-nodes POST bare JSON.
-
-**Room-level values are resolved by one precedence function**, `domain/precedence.ts`. Every
-consumer, present and future, reads through the same rule, so two views disagreeing is impossible
-by construction rather than by discipline.
-
-**Never average two instruments.** Precedence is an ordered list per `(room, kind)` and the first
-fresh source wins. The bedroom has two instruments reporting temperature and humidity — the Tado
-valve head sits on the radiator and reads warm, the Netatmo Home Coach stands across the room — and
-a mean describes neither.
-
-## Architecture
-
-```
-src/
-  config.ts             SOLE source of truth for topology: rooms, sensors
-                        (with isActive), per-(room, kind) precedence, freshness
-                        windows, the Tado zone map — all `as const`. RoomId and
-                        SensorId are derived from it, so a typo is a compile
-                        error.
-  domain/
-    measurement.ts      MeasurementKind, Reading
-    level.ts            Level, CommandedLevel, narrowing
-    signal.ts           RoomSignal — fresh | stale | missing
-    freshness.ts        PURE. reading + now + per-source window -> RoomSignal
-    time.ts             PURE. the ISO 8601 the API speaks <-> the
-                        Temporal.Instant the domain carries. Two functions.
-    precedence.ts       PURE. (room, kind, readings, now) -> winning RoomSignal.
-                        The one rule for what a room currently says.
-  sources/
-    source.ts           the two seams an adapter is built from: the
-                        SensorSource interface, and FetchLike — `fetch` as a
-                        parameter. Neither belongs to a vendor.
-    collector.ts        poll -> store, each source on its own cadence.
-    netatmo.ts          pull adapter: OAuth refresh, gethomecoachsdata.
-                        Defines NetatmoSettings.
-    refresh-token-file.ts
-                        a rotating refresh token, as a file on disk —
-                        deliberately not a database row. One file per vendor,
-                        named by the caller.
-    tado.ts             pull adapter: device-flow refresh, then one bulk read
-                        of every zone's state per poll. Defines TadoSettings,
-                        which is also Tado's on-switch.
-  ingest/
-    http.ts             batch validation and storage for POST /api/readings;
-                        the route itself lives in http/server.ts
-  store/
-    logs.ts             the service log behind GET /api/logs — append-only,
-                        level-less.
-    readings.ts         node:sqlite; append-only, no pruning path exists yet.
-  actuator/
-    unit.ts             VentilationUnit interface
-    modbus-tcp.ts       real implementation, FC3 + FC6
-    fake.ts             test double, records calls
-  http/
-    server.ts           the read API, POST /api/unit/level, the ingest route —
-                        uniform JSON, no vendor imports
-    netatmo-auth.ts     the /auth/netatmo onboarding pair, mounted whole by
-                        server.ts — the HTTP layer's human-facing half: its
-                        only HTML, its only mutable value (the OAuth state)
-                        and its only outbound fetch
-    tado-auth.ts        the /auth/tado onboarding route — ONE route, because
-                        the device flow has no callback.
-  temporal-guard.ts     refuses a runtime without Temporal, as main.ts's first
-                        import.
-  main.ts               wiring only
-tests/
-```
-
-**`precedence.ts`, `freshness.ts` and `time.ts` are pure and contain the interesting reasoning.**
-No IO, no clock reads, no database. Time arrives as a parameter, which is what makes them testable
-without hardware, and they are where to start reading.
-
-## Growth without a framework
-
-Automations are coming, and a dashboard will be built on this. Neither justifies infrastructure
-now. The seams that make growth additive already exist:
-
-- An automation is a pure function over a snapshot of readings and a timestamp.
-- Actuators sit behind an interface. A second device is a second adapter.
-- Readings are `(source, room, kind, value, time)`. A new sensor is config plus an adapter.
-- The store answers range queries. A dashboard is a read endpoint, not a schema change.
-
-So: **no rule engine, no plugin loader, no automation registry, no event bus.** When an automation
-arrives, write the function. If a third and fourth follow and a real pattern emerges, abstract
-*then*, against evidence.
+---
 
 ## Testing
 
 **The case list is the suite itself.** Test names are written to be read as sentences, and the
 reasoning behind a case is a comment above that case, where it cannot drift from the assertion it
-explains. [`docs/test-plan.md`](docs/test-plan.md) carries what a suite cannot: the per-module
-strategy, the conventions, the cases deliberately removed, and what is not tested at all.
+explains.
 
-The pure modules are written **test-first** — `freshness`, `precedence`, `time`. Adapters are
-tested after, against fakes, because their shape is not knowable until the real protocol has been
-spoken.
+**Before writing the tests for a new module, read [`docs/test-plan.md`](docs/test-plan.md)** — it
+says which modules are written test-first and which are tested after, and carries the cases
+deliberately removed and what is not tested at all.
 
 `node:test` + `node:assert/strict`. No framework.
 
+- The pure modules are written **test-first** — `freshness`, `precedence`, `time`. Adapters are
+  tested after, against fakes, because their shape is not knowable until the real protocol has been
+  spoken.
 - **Time is injected**, never read from a clock inside logic. `now` arrives as a
   `Temporal.Instant` parameter; only `main.ts` calls `Temporal.Now.instant()`.
 - **`assertDeepEqual` is the only deep assertion, and a test enforces it.** A `Temporal.Instant`
@@ -600,57 +328,6 @@ spoken.
 - **The cases that matter** are the failure ones: a sensor going stale mid-run, Netatmo
   unreachable, a reading exactly on a freshness boundary, a Modbus write timing out, a batch with
   one poisoned reading.
-
-## Configuration
-
-`config.ts` is the sole source of truth for **topology**: rooms; sensors with their room, kinds,
-`isActive` flag and freshness window; per-`(room, kind)` precedence order; and `TADO_ZONES`. All
-`as const`, so ids are literal union types and a typo is a compile error. Every time span in it is
-a `Temporal.Duration`, so the unit travels with the type instead of living in an `Ms` suffix. Spans
-become numbers again only at the platform's door — `setTimeout`, `AbortSignal.timeout` — one
-`total()` call at the top of the module that owns the timer.
-
-It also carries **`TIME_ZONE`**, the flat's IANA zone (`Europe/Prague`): anything that needs a
-local hour reads it from there, so behaviour never depends on how the host's clock is configured.
-Temporal handles the DST transitions; a fixed offset would not.
-
-Secrets — Netatmo's OAuth app, the Modbus host — come from environment variables and are never
-committed. Tado has no secret to keep. What neither vendor's credential can do is live in the
-environment:
-
-**Each vendor's refresh token lives in a file** — `data/netatmo-token.json` and
-`data/tado-token.json`, moved with `NETATMO_TOKEN_PATH` and `TADO_TOKEN_PATH`, both through
-`sources/refresh-token-file.ts` — because **both vendors rotate it on every refresh**. Something
-mutable has to hold the current one, and the two other candidates lose: an environment variable
-cannot be rewritten by a running process, and the database is append-only with no mutable row in
-it, on purpose — a credentials row would quietly spend that property, and would put a live secret
-inside every database backup besides. The file is written atomically (temp + rename, mode 0600),
-the new token is persisted **before** the new access token is used, and each adapter re-reads its
-file on every refresh, so a re-authorisation takes effect without a restart. Cost, accepted: two
-more files to back up, and a secret unencrypted on disk — which `.env` already is.
-
-**`TADO_TOKEN_PATH` is also Tado's on-switch**, since there is no credential in the environment to
-key on. Keyed on the *variable* rather than on whether the file exists, deliberately — a token file
-that has gone missing must fail loudly at every poll and point at `/auth/tado`, not quietly go
-silent while looking healthy. One switch per vendor, and they are independent: with only Netatmo
-configured the Tado rooms simply read `missing`, which is the honest answer.
-
-**Access-token expiry is deliberately not tracked for either vendor.** The token is used until the
-vendor refuses it, then refreshed and the request retried once — that path has to exist anyway, and
-a timer doing the same job would be a second mechanism. The price is one wasted request per token
-lifetime. What the refusal looks like is a measured fact rather than a convention for both of them;
-each adapter states its own at the constant.
-
-**Both poll intervals come from an inequality rather than from taste.** A reading is up to one
-vendor publishing interval old when fetched, plus up to one poll interval older before the next
-fetch, and the sum has to fit inside that source's freshness window. For Netatmo: ≤ 8 min refresh
-against a 15-minute window, so the interval must stay under 7 — it is 5. For Tado: a 20-minute
-heartbeat against a 25-minute window, so the interval must stay under 5 — it is 1, because a
-threshold crossing should be seen promptly and the dedup constraint absorbs the repeats for free.
-
-**Two numbers describe the world rather than configure the service: 20 and 80.** The floor is what
-the unit does; the ceiling is what the intake grille allows. They live in the `Level` and
-`CommandedLevel` types and change only if the hardware does.
 
 ---
 
@@ -711,6 +388,6 @@ Stated so the gaps read as decisions rather than omissions:
 - **Charts and UI.** JSON endpoints only.
 - **Controlling heating.** Tado keeps that. We read its sensors and nothing more.
 - **Users, auth, multi-home.** Single home, single occupant-operator, trusted LAN.
-- **Retention, downsampling, rollups.** Designed and costed above, not built. Nothing prunes.
+- **Retention, downsampling, rollups.** Designed and costed, not built. Nothing prunes.
 - **A `rooms` / `sensors` table.** Topology is config-only, on purpose.
 - **Runtime topology changes.** Adding a sensor is a config edit and a restart, not an API call.

@@ -388,7 +388,7 @@ describe('the http server', () => {
 
   it('drives the unit', async () => {
     // No token, deliberately: the endpoint is open on the trusted LAN, a
-    // decision that reversed a review finding — recorded in CLAUDE.md.
+    // decision that reversed a review finding — recorded in docs/api.md.
     await withServer({}, async ({ baseUrl, unit }) => {
       const response = await postLevel(baseUrl, JSON.stringify({ level: 50 }));
 

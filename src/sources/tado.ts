@@ -79,7 +79,7 @@ export function createTadoSource(options: TadoOptions, fetchImpl: FetchLike = fe
   // Access tokens live ten minutes, so refreshing is the hot path here — every
   // tenth poll or so, where the Netatmo adapter refreshes every few hours.
   // Expiry is discovered from the refusal rather than tracked against a clock;
-  // see CLAUDE.md, "Configuration".
+  // see docs/sensors.md, "Credentials".
   let accessToken: string | undefined;
 
   // The home id and the zone list only change when someone rearranges the

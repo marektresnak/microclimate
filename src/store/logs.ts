@@ -7,8 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
  *
  * The second table in the file, and append-only like the first — a log line is
  * a fact about a point in time, so the database keeps its no-mutable-row
- * property untouched. No severity column and no pruning; see CLAUDE.md, "The
- * service log".
+ * property untouched. No severity column and no pruning; see docs/storage.md,
+ * "The service log — the second table, deliberately".
  *
  * Exported so the tests assert against the real schema rather than a copy of it.
  */

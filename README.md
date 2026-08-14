@@ -56,7 +56,8 @@ adapter, serving the API — admitted late and deliberately; everything else is 
 
 ## Four decisions worth knowing before you read
 
-Each is argued where it is enforced; [`CLAUDE.md`](CLAUDE.md) has the full reasoning.
+Each is argued where it is enforced; [`CLAUDE.md`](CLAUDE.md) states them as rules and
+[`docs/`](docs/) carries the full reasoning.
 
 - **Freshness is per source, never global.** A 20-minute-old Tado reading is healthy — that is how
   often a valve publishes when nothing changes — while a Netatmo silent that long has missed two
@@ -117,9 +118,9 @@ the air. A suite that runs green without a typecheck would not notice the guard 
 ## Deliberately out of scope
 
 Docker, any UI or charting, control of the Tado heating (read-only to us), authentication — every
-endpoint is open on the trusted LAN, a recorded acceptance in [`CLAUDE.md`](CLAUDE.md) — and
-retention/downsampling, which is designed and costed there but not built. Until it exists,
-**nothing prunes**.
+endpoint is open on the trusted LAN, a recorded acceptance in [`docs/api.md`](docs/api.md) — and
+retention/downsampling, which is designed and costed in [`docs/storage.md`](docs/storage.md) but
+not built. Until it exists, **nothing prunes**.
 
 Sensor topology lives in config rather than the database, on purpose: it gives literal union types
 for room and sensor ids, so a typo is a compile error, and git records *why* a sensor moved in a

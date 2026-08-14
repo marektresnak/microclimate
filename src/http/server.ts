@@ -34,8 +34,8 @@ import type { ReadingStore } from '../store/readings.ts';
  * knows a framework is underneath.
  *
  * No endpoint carries auth — single home, trusted LAN, deliberate. Do not add
- * it here; the acceptance and its bounds are in CLAUDE.md, "Both write
- * endpoints are open on the LAN".
+ * it here; the acceptance and its bounds are in docs/api.md, "Both write
+ * endpoints are open on the LAN, knowingly".
  *
  * Time arrives through `clock`, so every test runs against a fixed instant —
  * and the Tado onboarding route needs it for a second reason: a device code has

@@ -2,7 +2,8 @@ import type { SensorId } from '../config.ts';
 
 // TEXT in the database for the same reason this is a plain union here: a new
 // measurement is a new member, never a migration. Canonical units are fixed and
-// documented in CLAUDE.md — conversion happens in the adapter, at the edge.
+// documented in CLAUDE.md, "Rules the data keeps" — conversion happens in the
+// adapter, at the edge.
 export type MeasurementKind =
   | 'temperature' // °C
   | 'humidity' // % RH

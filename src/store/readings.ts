@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS readings (
 // denormalised room column. A test asserts the query plan, so reordering the
 // constraint fails loudly.
 //
-// Half-open [from, to), so adjacent windows tile — see CLAUDE.md, "The read API".
+// Half-open [from, to), so adjacent windows tile — see CLAUDE.md, "Rules the
+// API keeps".
 export const RANGE_QUERY_SQL = `
 SELECT value, measured_at, received_at FROM readings
 WHERE source_id = ? AND kind = ? AND measured_at >= ? AND measured_at < ?
