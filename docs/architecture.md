@@ -68,6 +68,21 @@ tests/
 No IO, no clock reads, no database. Time arrives as a parameter, which is what makes them testable
 without hardware, and they are where to start reading.
 
+Coming to this cold, that first paragraph is the fastest way in, in this order:
+
+| | |
+|---|---|
+| [`precedence.ts`](../src/domain/precedence.ts) | which instrument answers for a room |
+| [`freshness.ts`](../src/domain/freshness.ts) | whether a reading still counts |
+| [`config.ts`](../src/config.ts) | the whole topology |
+| [`ingest/http.ts`](../src/ingest/http.ts) | what lands, what is refused, and why |
+
+Then [`tests/precedence.test.ts`](../tests/precedence.test.ts) and
+[`tests/ingest.test.ts`](../tests/ingest.test.ts), which are written to read as sentences. For the
+code that talks to hardware rather than the code that decides, read
+[`actuator/modbus-tcp.ts`](../src/actuator/modbus-tcp.ts) — two function codes against one
+register, tested byte by byte against a fake stream and verified against the real unit.
+
 **Room-level values are resolved by one precedence function**, `domain/precedence.ts`. Every
 consumer, present and future, reads through the same rule, so two views disagreeing is impossible
 by construction rather than by discipline.

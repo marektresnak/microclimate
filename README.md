@@ -1,81 +1,38 @@
 # microclimate
 
-Collects readings from the sensors in my flat, stores them, exposes them over a small JSON API,
-and sets the HRV (heat-recovery ventilation) unit's fan level over Modbus when asked to.
+A home service for one flat. It reads the temperature, humidity and CO₂ sensors in three rooms,
+keeps every reading in a local database, serves the current state and the history over a small
+JSON API, and sets the fan level on the flat's ventilation unit over Modbus.
 
-> **Status.** The collection platform is built and tested — config and domain types, freshness,
-> precedence, the SQLite store, the batch ingest endpoint, both pull adapters (Netatmo and Tado)
-> with their OAuth onboarding pages, the Modbus TCP client, and the JSON API. Both adapters have
-> been run against the real vendors, and the Modbus client against the real unit. What is left is
-> the push hardware and the automation.
->
-> **Nothing moves the fan automatically — yet.** An automation driving the unit from CO₂ is the
-> intention, and a first implementation existed. It was removed rather than shipped: every number
-> it depended on was an assumption about a flat nobody has measured, and this phase collects the
-> data that will replace those assumptions. The last commit carrying it is
-> [`a75fba3`](https://github.com/marektresnak/microclimate/tree/a75fba33d1969e072f918b45944595cb0659f160).
+That unit is an HRV — heat-recovery ventilation. It runs continuously, pushing stale air out and
+drawing fresh air in through a heat exchanger, so the flat gets fresh air without losing the heat
+along with it. Its fan runs at 20–80% in steps of 10, and that dial is the only lever over the air
+in here: turn it up and CO₂ should clear faster. By how much, in this flat, nobody has measured.
 
-## The problem
+**The main goal is to automate that dial.** The service should read CO₂, pick a fan level, set it,
+and keep doing that without anyone touching the panel. Everything built so far is groundwork for
+that loop: every reading kept with its source and its timestamps, one rule for what a room
+currently says, and a log of every level that was set. A dashboard over the same data can come
+later.
 
-Three rooms, sensors from two vendors with completely different refresh rates, one CO₂ instrument,
-and a ventilation unit that runs at 20–80% in 10% steps. Before anything can drive that unit well,
-the flat has to be understood: how fresh each instrument's word is, which instrument answers for a
-room, and how the air actually responds when the fan holds a level — none of which has ever been
-measured.
+**It is not built yet, on purpose.** An automation needs thresholds: run at this level above that
+CO₂ reading. Picking them means knowing how the air in here actually responds, which is the thing
+nobody has measured. So the fan is set by hand for now, from the wall panel or
+`POST /api/unit/level`, and this phase collects the data those thresholds will come from. A first
+version was written and removed instead of shipped, at
+[`a75fba3`](https://github.com/marektresnak/microclimate/tree/a75fba33d1969e072f918b45944595cb0659f160).
 
-So the service does the durable part first. It collects every reading with its provenance and two
-timestamps, serves current state and history over JSON, and sets the fan level over Modbus when
-asked — which is how the measurement data gets made: hold a level over the API, watch CO₂ settle,
-and the service log keeps the record of what was set when, next to the curve it explains.
-
-## Where to look first
-
-These, in this order, are the fastest way in. The first two are pure functions — time arrives as a
-parameter, nothing reads a clock or a database:
-
-| | | |
-|---|---|---|
-| [`src/domain/precedence.ts`](src/domain/precedence.ts) | ~65 lines | which instrument answers for a room |
-| [`src/domain/freshness.ts`](src/domain/freshness.ts) | ~35 lines | whether a reading still counts |
-| [`src/config.ts`](src/config.ts) | ~145 lines | the whole topology |
-| [`src/ingest/http.ts`](src/ingest/http.ts) | ~155 lines | batch ingest: what lands, what is refused, and why |
-
-If you want the code that talks to hardware rather than the code that decides, read
-[`src/actuator/modbus-tcp.ts`](src/actuator/modbus-tcp.ts) — hand-rolled Modbus TCP, two function
-codes against one register, tested byte by byte against a fake stream and verified end to end
-against the real unit.
-
-Then the tests, which are meant to read as sentences:
-
-- [`tests/precedence.test.ts`](tests/precedence.test.ts) — who answers for a room, and when
-- [`tests/ingest.test.ts`](tests/ingest.test.ts) — what is accepted, refused, and deduplicated, and
-  why a replayed backlog is welcome at any age
-
-Around 3,600 lines of source and 3,900 of tests. Two runtime dependencies — `hono` and its Node
-adapter, serving the API — admitted late and deliberately; everything else is Node built-ins.
-
-## Four decisions worth knowing before you read
-
-Each is argued where it is enforced; [`CLAUDE.md`](CLAUDE.md) states them as rules and
-[`docs/`](docs/) carries the full reasoning.
-
-- **Freshness is per source, never global.** A 20-minute-old Tado reading is healthy — that is how
-  often a valve publishes when nothing changes — while a Netatmo silent that long has missed two
-  refreshes. One staleness window cannot judge both.
-- **Two instruments are never averaged.** Precedence is an ordered list per (room, kind) and the
-  first fresh source wins. The bedroom's valve head sits on a radiator and reads warm; the Home
-  Coach stands across the room. A mean belongs to neither.
-- **`measured_at` and `received_at` are never conflated**, and freshness is always judged on the
-  first. A push node replaying a buffered backlog delivers hours-old readings in one request.
-- **Every instant on the wire is an ISO 8601 string with an explicit zone.** Epoch milliseconds
-  exist only inside the store, where a uniqueness constraint needs one representation per instant.
+**Status.** The collection platform is built and tested: config and domain, the SQLite store, the
+batch ingest endpoint, both pull adapters with their OAuth onboarding pages, the Modbus TCP client
+and the JSON API. Both adapters have been run against the real vendors, and the Modbus client
+against the real unit. What is left is the push hardware and the automation.
 
 ## Running
 
 Requires **Node 26 or later, and an official nodejs.org build** (developed on 26.7.0 via nvm;
-`.nvmrc` says so) — `Temporal` is built in there, and Homebrew's node compiles it out. No build
-step otherwise: Node strips the types at runtime and `node:sqlite` is built in, so there is nothing
-to compile, native or otherwise.
+`.nvmrc` says so) — `Temporal` is built in there, and Homebrew's node compiles it out. There is no
+build step: Node strips the types at runtime and `node:sqlite` is built in, so there is nothing to
+compile, native or otherwise.
 
 ```sh
 npm install
@@ -97,31 +54,21 @@ open http://localhost:3000/auth/netatmo             # one-time Netatmo authorisa
 open http://localhost:3000/auth/tado                # one-time Tado authorisation
 ```
 
-Both onboarding pages exist so no refresh token is ever pasted by hand: each vendor rotates its
-token on every refresh, so the file the page writes is the only copy that stays true.
-
 ```sh
 npm test       # typechecks first, then node:test — no framework
 npm run typecheck
 ```
 
-`npm test` runs `tsc --noEmit` before the suite, and that is not a convenience. Type stripping
-deletes the types without checking them, so nothing at runtime enforces `CommandedLevel` — and
-`CommandedLevel` is the entire guard against commanding 90% into an intake grille that cannot pass
-the air. A suite that runs green without a typecheck would not notice the guard had gone.
+**Never run `node --test` on its own** — the suite goes green without the typecheck that enforces
+`CommandedLevel`. [`CLAUDE.md`](CLAUDE.md) says why.
 
-## Not built yet
+## Where the rest is written
 
-- **The SEN66 push nodes.** The ingest endpoint is live and tested; the hardware is not built.
-- **The CO₂ automation.** See the status note up top.
-
-## Deliberately out of scope
-
-Docker, any UI or charting, control of the Tado heating (read-only to us), authentication — every
-endpoint is open on the trusted LAN, a recorded acceptance in [`docs/api.md`](docs/api.md) — and
-retention/downsampling, which is designed and costed in [`docs/storage.md`](docs/storage.md) but
-not built. Until it exists, **nothing prunes**.
-
-Sensor topology lives in config rather than the database, on purpose: it gives literal union types
-for room and sensor ids, so a typo is a compile error, and git records *why* a sensor moved in a
-way a table never could.
+| | |
+|---|---|
+| [`CLAUDE.md`](CLAUDE.md) | The rules, and the facts that cost a live session with the hardware. |
+| [`docs/architecture.md`](docs/architecture.md) | The module map, the two dependencies, and where to start reading. |
+| [`docs/sensors.md`](docs/sensors.md) | Both vendors, and where the freshness windows and poll intervals come from. |
+| [`docs/storage.md`](docs/storage.md) | The schema, the service log, topology-in-config, the retention design. |
+| [`docs/api.md`](docs/api.md) | The endpoints, the wire format, and the ingest and auth arguments. |
+| [`docs/test-plan.md`](docs/test-plan.md) | Per-module test strategy and conventions. |
