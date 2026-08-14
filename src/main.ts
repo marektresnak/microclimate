@@ -17,7 +17,6 @@ import type { SensorSource } from './sources/source.ts';
 import { createTadoSource } from './sources/tado.ts';
 import type { TadoSettings } from './sources/tado.ts';
 import { toIsoUtc } from './domain/time.ts';
-import { createSyntheticNetatmo, createSyntheticTado } from './sources/synthetic.ts';
 import { openLogStore } from './store/logs.ts';
 import { openReadingStore } from './store/readings.ts';
 
@@ -106,26 +105,25 @@ const netatmoSettings: NetatmoSettings | undefined =
 // secret, so there is no credential in the environment to key on. Keyed on the
 // variable rather than on whether the file exists, deliberately — a lost token
 // file has to fail loudly at every poll and point at /auth/tado, not quietly
-// flip the service back to writing synthetic readings into the real database.
+// unconfigure the vendor and leave the valves looking like they were never asked
+// for.
 const tadoTokenPath = envOrUndefined('TADO_TOKEN_PATH');
 const tadoSettings: TadoSettings | undefined =
   tadoTokenPath === undefined ? undefined : { tokenPath: tadoTokenPath };
 
-// Configuring a vendor means its REAL adapter and nothing else. The synthetic
-// sources write under the same source ids as the real ones, so mixing them
-// would salt the database with invented readings — and the record of real air
-// this phase exists to gather has to be real or it is worthless.
-//
-// One switch per vendor, so the two are independent: with only Netatmo
+// One switch per vendor, and the two are independent: with only Netatmo
 // configured the Tado rooms simply go quiet, which is the honest answer and the
-// one /api/state already knows how to give. The synthetic pair stands in only
-// while neither vendor is configured, which is what makes `npm start` a demo on
-// a machine with no credentials at all.
+// one /api/state already knows how to give. With neither configured the list is
+// empty and the service collects nothing of its own — it still serves, and
+// still accepts whatever a push node sends it. Nothing stands in: a source that
+// invented readings would write them under the real instruments' ids, and the
+// record of real air this phase exists to gather has to be real or it is
+// worthless.
 function chooseSources(): readonly SensorSource[] {
-  const real: SensorSource[] = [];
+  const configured: SensorSource[] = [];
 
   if (netatmoSettings !== undefined) {
-    real.push(
+    configured.push(
       createNetatmoSource({
         settings: netatmoSettings,
         deviceId: envOrUndefined('NETATMO_DEVICE_ID'),
@@ -137,12 +135,10 @@ function chooseSources(): readonly SensorSource[] {
   }
 
   if (tadoSettings !== undefined) {
-    real.push(createTadoSource({ settings: tadoSettings, zones: TADO_ZONES, log }));
+    configured.push(createTadoSource({ settings: tadoSettings, zones: TADO_ZONES, log }));
   }
 
-  if (real.length === 0) return [createSyntheticNetatmo(), createSyntheticTado()];
-
-  return real;
+  return configured;
 }
 
 const unit = chooseUnit();
@@ -161,8 +157,15 @@ const server = createApiServer({
 server.listen(port);
 
 const unitDescription = envOrUndefined('HRV_MODBUS_HOST') ?? 'a fake unit (no HRV_MODBUS_HOST set)';
+// An empty source list is a legitimate way to run — the ingest endpoint and the
+// read API are the whole service to a push node — so it says so and starts,
+// rather than treating it as a misconfiguration.
+const sourceDescription =
+  sources.length === 0
+    ? 'no vendor (set NETATMO_CLIENT_ID or TADO_TOKEN_PATH to poll one)'
+    : sources.map((source) => source.name).join(', ');
 console.log(
-  `microclimate — collecting from ${sources.map((source) => source.name).join(', ')}, ` +
+  `microclimate — collecting from ${sourceDescription}, ` +
     `serving http on :${port}, driving ${unitDescription} by hand only, storing to ${databasePath}`,
 );
 

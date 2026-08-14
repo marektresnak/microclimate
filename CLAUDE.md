@@ -690,10 +690,6 @@ src/
                         FetchLike stopped living in netatmo.ts (2026-08-14):
                         the Tado adapter was importing the Netatmo one for a
                         type alias.
-    synthetic.ts        plausible CO₂ curves on a schedule, so `npm start` runs
-                        without hardware. A demo, not a simulation. Runs only
-                        while NEITHER vendor is configured — same source ids,
-                        real database.
     collector.ts        poll -> store, each source on its own cadence.
     netatmo.ts          pull adapter: OAuth refresh, gethomecoachsdata.
                         fetch is injected the way OpenStream is in modbus-tcp.
@@ -846,9 +842,10 @@ fresh authorisation the operator did not know they needed.
 **`TADO_TOKEN_PATH` is also Tado's on-switch**, since there is no credential in the environment to
 key on: set it and the real valves are polled, unset and they are not. Keyed on the *variable*
 rather than on whether the file exists, deliberately — a token file that has gone missing must
-fail loudly at every poll and point at `/auth/tado`, not quietly flip the service back to writing
-synthetic readings under real source ids. One switch per vendor, and they are independent: with
-only Netatmo configured the Tado rooms simply read `missing`, which is the honest answer.
+fail loudly at every poll and point at `/auth/tado`, not quietly go silent while looking healthy.
+One switch per vendor, and they are independent: with only Netatmo configured the Tado rooms
+simply read `missing`, which is the honest answer. With neither configured nothing is collected
+and nothing stands in — see "No synthetic sources" below.
 
 Access-token expiry is deliberately not tracked for either vendor. The token is used until the
 vendor refuses it, then refreshed and the request retried once — that path has to exist anyway,
@@ -917,6 +914,17 @@ Stated so the gaps read as decisions rather than omissions:
 - **The CO₂ automation.** Intended, previously implemented, removed until real data exists to
   design it against — see "The automation comes later", which carries the pointer to the
   implementation in git.
+- **No synthetic sources (removed 2026-08-14).** A pair of them used to stand in while neither
+  vendor was configured, so `npm start` demonstrated the whole service on a machine with no
+  credentials. Both vendors are configured now and the pair had become unreachable code on the
+  only machine that runs this — kept alive for a reviewer who would have to be told they were
+  reading invented numbers anyway, and paid for with a module, its tests, a branch in `main.ts`
+  and `domain/clock.ts`, which existed for nothing else. The demo was the weaker half of the
+  argument: what a reviewer should read is the pure modules and their tests, which say more about
+  the design than a curve nobody measured. With no vendor configured the service now collects
+  nothing, serves the API, and accepts pushed readings — the same honest silence a half-configured
+  service already gave. The last commit carrying them is
+  [`ea1713c`](https://github.com/marektresnak/microclimate/tree/ea1713ca3b2c32b15c9ae3a155c1117a60207c1c).
 - **Docker.** Comes later; the service runs on a home server eventually.
 - **Charts and UI.** JSON endpoints only. A dashboard adds hours and demonstrates nothing for a
   backend sample.

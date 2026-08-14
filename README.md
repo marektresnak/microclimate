@@ -16,10 +16,11 @@ and sets the HRV (heat-recovery ventilation) unit's fan level over Modbus when a
 > implementation is
 > [`a75fba3`](https://github.com/marektresnak/microclimate/tree/a75fba33d1969e072f918b45944595cb0659f160).
 >
-> `npm start` collects from synthetic sensors into a real store, serves the API, and lets you
-> drive a recording fake unit. Set `HRV_MODBUS_HOST` to drive the real one; set the Netatmo
-> credentials or `TADO_TOKEN_PATH` to poll that vendor's real instruments instead of the
-> synthetics — one switch per vendor, and the synthetics stand in only while neither is set.
+> `npm start` serves the API and lets you drive a recording fake unit; set `HRV_MODBUS_HOST` to
+> drive the real one. Each vendor has its own switch — the Netatmo credentials, or
+> `TADO_TOKEN_PATH` — and only a configured vendor is polled. With neither set the service
+> collects nothing and every room reads `missing`: nothing invented stands in, because a stand-in
+> would write under the real instruments' ids.
 
 ## The problem
 
@@ -96,7 +97,7 @@ nothing to compile, native or otherwise. The two runtime dependencies (`hono`,
 
 ```sh
 npm install
-npm start                             # synthetic sensors, fake unit, API on :3000
+npm start                             # fake unit, API on :3000, whichever vendors .env configures
 HRV_MODBUS_HOST=192.168.0.65 npm start  # …with the real HRV unit behind the API
 ```
 
