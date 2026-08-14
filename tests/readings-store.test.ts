@@ -40,9 +40,7 @@ describe('the readings store', () => {
   });
 
   it('absorbs a replayed batch without storing it twice', () => {
-    // Push nodes retry, and a retried batch must be a no-op. Duplicates in a
-    // metrics store do not announce themselves; they surface months later as
-    // spikes in a graph.
+    // Push nodes retry, and a retried batch must be a no-op.
     const store = openReadingStore(':memory:');
     const batch = [
       reading('bedroom_netatmo', 'co2', 812, NOW.subtract({ minutes: 2 })),
@@ -70,8 +68,6 @@ describe('the readings store', () => {
   });
 
   it('keeps the original received_at when a reading is retried', () => {
-    // That is when the reading genuinely first arrived, and the retry is not
-    // news. Overwriting it would quietly rewrite the arrival history.
     const store = openReadingStore(':memory:');
     const measuredAt = NOW.subtract({ minutes: 10 });
 
@@ -99,9 +95,6 @@ describe('the readings store', () => {
   });
 
   it('returns a replayed backlog in the order it was measured', () => {
-    // Same rule as the latest-reading query, and it matters more here: a history
-    // series ordered by arrival puts a replayed backlog after the readings that
-    // overtook it, and a graph drawn from that is quietly wrong.
     const store = openReadingStore(':memory:');
     store.insert([
       reading('bedroom_netatmo', 'co2', 845, NOW.subtract({ minutes: 1 }), NOW.subtract({ minutes: 1 })),
