@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
  * and `PT15M` for a duration — or the strings will honestly differ. A duration
  * therefore compares by spelling rather than by length: `{ hours: 1 }` and
  * `{ minutes: 60 }` are one span in two texts. That is the side to err on for a
- * number a reviewer reads out of config.
+ * number someone reads out of config.
  *
  * What the projection gives up: an instant and its own ISO text are
  * indistinguishable here, so this cannot assert that a field carries a real

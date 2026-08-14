@@ -11,10 +11,10 @@ shapes the data model — provenance, timestamps and units are designed for a re
 not exist yet — but it does **not** license building a rule engine, a plugin system, or an
 automation registry. See "Growth without a framework" below.
 
-**This is also a job-application work sample.** A reviewer should be able to read it and form an
-opinion in 15–30 minutes. That sets the bar for everything below: small, obvious, well-tested,
-and defensible line by line. If a change makes the codebase harder to explain to someone reading
-it cold, it is the wrong change.
+**Legibility is a requirement, not a nicety.** Someone should be able to read this cold and come
+away with an accurate picture of it. That sets the bar for everything below: small, obvious,
+well-tested, and defensible line by line. If a change makes the codebase harder to explain to
+someone coming to it fresh, it is the wrong change.
 
 ---
 
@@ -132,7 +132,7 @@ HTTP layer — `http/server.ts` and the onboarding module it mounts, `http/netat
 after the hand-rolled dispatch kept failing this document's own readability test on re-reading. Both are pure JavaScript with no transitive dependencies, no
 native code and no install scripts; the adapter exists only because Hono speaks web-standard
 Request/Response and Node does not. The bar for any further dependency is unchanged: something I
-would have to defend in an interview, admitted only when it absorbs boilerplate rather than
+would have to defend line by line, admitted only when it absorbs boilerplate rather than
 decisions — which is also why the framework stops at routing, body plumbing and the onboarding
 pages' HTML escaping (`hono/html`'s tagged template replaced a hand-rolled escaper on
 2026-08-12: it escapes every interpolation by default, so a future edit cannot forget to),
@@ -145,7 +145,7 @@ way to be readable, and that history is in git.
 **Modbus is hand-rolled**, not a library. We need exactly two function codes (read holding
 registers, write single register) against a documented register map. A general Modbus library is
 several thousand lines of protocol we do not use. The minimal client is ~100 lines, fully
-testable against a fake socket, and is a better thing for a reviewer to read.
+testable against a fake socket, and is a better thing to read.
 
 ---
 
@@ -740,7 +740,7 @@ tests/
 
 **`precedence.ts`, `freshness.ts` and `time.ts` are pure and contain the interesting
 reasoning.** No IO, no clock reads, no database. Time arrives as a parameter, which is what
-makes them testable without hardware, and they are where a reviewer should start.
+makes them testable without hardware, and they are where to start reading.
 
 `main.ts` does wiring and nothing else.
 
@@ -763,8 +763,7 @@ So: **no rule engine, no plugin loader, no automation registry, no event bus.** 
 automation arrives, write the function. If a third and fourth follow and a real pattern
 emerges, abstract *then*, against evidence.
 
-A reviewer has twenty minutes and wants to read one thing that works — not scaffolding for five
-things that do not.
+A reader wants one thing that works — not scaffolding for five things that do not.
 
 ## Testing
 
@@ -797,8 +796,8 @@ been spoken.
   unreachable, a reading exactly on a freshness boundary, a Modbus write timing out, a batch
   with one poisoned reading.
 
-A reviewer should be able to read the precedence and ingest tests alone and understand what the
-system promises.
+The precedence and ingest tests should be readable on their own and still say what the system
+promises.
 
 ---
 
@@ -917,10 +916,10 @@ Stated so the gaps read as decisions rather than omissions:
 - **No synthetic sources (removed 2026-08-14).** A pair of them used to stand in while neither
   vendor was configured, so `npm start` demonstrated the whole service on a machine with no
   credentials. Both vendors are configured now and the pair had become unreachable code on the
-  only machine that runs this — kept alive for a reviewer who would have to be told they were
+  only machine that runs this — kept alive for a reader who would have to be told they were
   reading invented numbers anyway, and paid for with a module, its tests, a branch in `main.ts`
   and `domain/clock.ts`, which existed for nothing else. The demo was the weaker half of the
-  argument: what a reviewer should read is the pure modules and their tests, which say more about
+  argument: what is worth reading is the pure modules and their tests, which say more about
   the design than a curve nobody measured. With no vendor configured the service now collects
   nothing, serves the API, and accepts pushed readings — the same honest silence a half-configured
   service already gave. The last commit carrying them is

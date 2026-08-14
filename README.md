@@ -38,8 +38,8 @@ explains.
 
 ## Where to look first
 
-A reviewer with twenty minutes should read these, in this order. The first two are pure
-functions — time arrives as a parameter, nothing reads a clock or a database:
+These, in this order, are the fastest way in. The first two are pure functions — time arrives as
+a parameter, nothing reads a clock or a database:
 
 | | | |
 |---|---|---|
