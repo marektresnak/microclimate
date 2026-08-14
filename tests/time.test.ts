@@ -38,6 +38,11 @@ describe('reading an instant from the API', () => {
     // stamps readings in whatever zone its firmware was given, and all of these
     // name one moment. They must all become one instant, or the uniqueness
     // constraint would file the same reading several times over.
+    //
+    // Checked by mutation (2026-08-14): making parseInstant read the wall clock
+    // and ignore the offset fails six tests — two here, three in ingest, one
+    // round trip through the server — and nothing else in the suite moves. A
+    // case that cannot fail is not covering anything.
     const sameMoment = [
       '2026-08-12T09:36:00Z',
       '2026-08-12T09:36:00+00:00',

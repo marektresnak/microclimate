@@ -767,8 +767,13 @@ A reader wants one thing that works — not scaffolding for five things that do 
 
 ## Testing
 
-**Full case list: [`docs/test-plan.md`](docs/test-plan.md)** — written before the
-implementation, module by module, and kept current as modules land.
+**The case list is the suite itself.** Test names are written to be read as sentences, and the
+reasoning behind a case is a comment above that case, where it cannot drift from the assertion it
+explains. [`docs/test-plan.md`](docs/test-plan.md) carries what a suite cannot: the per-module
+strategy, the conventions, the cases deliberately **removed** with their dates, and what is not
+tested at all. It held the full case list first — written before the implementation, which is why
+the pure modules could be — and was cut back to those four things on 2026-08-14, once every bullet
+in it had an executable twin.
 
 The pure modules are written **test-first** — `freshness`, `precedence`, `time`. Adapters are
 tested after, against fakes, because their shape is not knowable until the real protocol has
